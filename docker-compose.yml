@@ -1,0 +1,18 @@
+services:
+  threejs-asset-generator:
+    build: .
+    container_name: threejs-asset-generator
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      # Optional: Upstash Redis / Vercel KV for distributed sessions
+      # - UPSTASH_REDIS_REST_URL=
+      # - UPSTASH_REDIS_REST_TOKEN=
+      # Optional: Default AI provider keys (users can also enter keys in the UI)
+      # - GEMINI_API_KEY=
+      # - ANTHROPIC_API_KEY=
+      # - OPENAI_API_KEY=
+      # - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
