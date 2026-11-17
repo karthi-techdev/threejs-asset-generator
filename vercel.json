@@ -11,7 +11,7 @@
   "rewrites": [
     {
       "source": "/mcp",
-      "destination": "/api/mcp"
+      "destination": "/api/index?__mcp=1"
     },
     {
       "source": "/api/(.*)",

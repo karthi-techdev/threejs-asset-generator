@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { sessionStore, sanitizeSessionToken } from './sessionStore.js';
 import { getAllSkills, getRelevantSkills } from './skillLoader.js';
 
-const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26', '2024-11-05']);
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']);
 
 /**
  * Extracts session token from HTTP request query params, custom headers, or Authorization.
@@ -148,8 +148,9 @@ export async function handleMcpRpcMessage(
   // 1. initialize
   if (method === 'initialize') {
     const requestedVersion = rpcBody.params?.protocolVersion;
+    const isDateVersion = typeof requestedVersion === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(requestedVersion);
     const protocolVersion =
-      typeof requestedVersion === 'string' && SUPPORTED_PROTOCOL_VERSIONS.has(requestedVersion)
+      typeof requestedVersion === 'string' && (SUPPORTED_PROTOCOL_VERSIONS.has(requestedVersion) || isDateVersion)
         ? requestedVersion
         : '2025-03-26';
 
@@ -420,10 +421,20 @@ export async function handleMcpRpcMessage(
  */
 export async function expressMcpHandler(req: Request, res: Response) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-session-token, Mcp-Session-Id, MCP-Protocol-Version');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Accept, Authorization, x-session-token, Mcp-Session-Id, MCP-Protocol-Version'
+  );
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version');
+  res.setHeader('Cache-Control', 'no-store');
 
   if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+
+  if (req.method === 'DELETE') {
+    console.log('[mcp] DELETE session teardown');
     return res.status(204).end();
   }
 
@@ -437,12 +448,12 @@ export async function expressMcpHandler(req: Request, res: Response) {
   const host = `${proto}://${rawHost}`;
 
   // GET /mcp:
-  // Per MCP Streamable HTTP spec, if a client explicitly requests an SSE stream (text/event-stream),
-  // respond with 405 Method Not Allowed to cleanly signal HTTPS JSON-RPC only (no SSE).
-  // Otherwise return human/machine-readable JSON server status.
+  // Per MCP Streamable HTTP spec, if a client requests an SSE stream (Accept includes text/event-stream),
+  // respond with 405 Method Not Allowed to cleanly signal pure HTTPS JSON-RPC (no SSE).
   if (req.method === 'GET') {
     const accept = String(req.headers.accept || '');
-    if (accept.includes('text/event-stream') && !accept.includes('text/html') && !accept.includes('*/*')) {
+    console.log(`[mcp] GET token=${sessionToken || 'none'} accept="${accept}"`);
+    if (accept.includes('text/event-stream') && !accept.includes('text/html')) {
       return res.status(405).json({
         jsonrpc: '2.0',
         error: {
@@ -489,7 +500,16 @@ export async function expressMcpHandler(req: Request, res: Response) {
   // POST /mcp: Stateless HTTPS JSON-RPC 2.0 execution (supports single message or JSON-RPC batch)
   if (req.method === 'POST') {
     try {
-      const body = req.body;
+      let body = req.body;
+      if (typeof body === 'string' && body.trim().length > 0) {
+        body = JSON.parse(body);
+      }
+
+      const rpcMethod = Array.isArray(body) ? `batch(${body.length})` : body?.method || 'unknown';
+      const toolName = !Array.isArray(body) && body?.method === 'tools/call' ? `/${body?.params?.name || ''}` : '';
+      console.log(
+        `[mcp] POST ${rpcMethod}${toolName} token=${sessionToken || 'none'} storage=${sessionStore.getBackendType()}`
+      );
 
       if (Array.isArray(body)) {
         const results = (

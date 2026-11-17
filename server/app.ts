@@ -12,14 +12,17 @@ app.use(cors());
 // Guard against double body-parsing when deployed on Vercel Serverless Functions
 app.use((req, _res, next) => {
   if (req.body !== undefined && req.body !== null) {
-    if (typeof req.body === 'string' && req.body.trim().startsWith('{')) {
-      try {
-        req.body = JSON.parse(req.body);
-      } catch {
-        // leave raw string
+    if (typeof req.body === 'string') {
+      const trimmed = req.body.trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          req.body = JSON.parse(trimmed);
+        } catch {
+          // leave raw string
+        }
       }
     }
-    if (typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    if (typeof req.body === 'object' && (Array.isArray(req.body) || Object.keys(req.body).length > 0)) {
       (req as any)._body = true;
     }
   }
@@ -32,6 +35,12 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // --- MCP (Model Context Protocol) Endpoint: Pure HTTPS JSON-RPC 2.0 (Stateless, No-SSE) ---
 app.all('/mcp', expressMcpHandler);
 app.all('/api/mcp', expressMcpHandler);
+app.all('/api/index', (req, res, next) => {
+  if (req.query.__mcp === '1' || req.body?.jsonrpc === '2.0') {
+    return expressMcpHandler(req, res);
+  }
+  return next();
+});
 
 // --- API Routes ---
 
@@ -134,6 +143,7 @@ app.post('/api/sessions/:id/code', async (req, res) => {
 
 // Fetch current code for a session
 app.get('/api/sessions/:id/code', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const { id } = req.params;
   const session = await sessionStore.getSession(id);
   if (!session) {
@@ -161,6 +171,7 @@ app.post('/api/sessions/:id/render', async (req, res) => {
 
 // External AI agent calls this to inspect what the 3D model looks like in the viewport
 app.get('/api/sessions/:id/render', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const { id } = req.params;
   const session = await sessionStore.getSession(id);
   if (!session || !session.latestRender) {

@@ -178,7 +178,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
     const pollSession = async () => {
       try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(cleanToken)}/code`);
+        const res = await fetch(`/api/sessions/${encodeURIComponent(cleanToken)}/code`, {
+          cache: 'no-store',
+        });
         if (res.ok) {
           const data = await res.json();
           const remote = data.session;
