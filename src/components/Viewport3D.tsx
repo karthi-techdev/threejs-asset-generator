@@ -261,6 +261,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             namedTickMapRef.current[activeName](scaledDt, animElapsedRef.current);
           } else if (typeof currentModelRef.current.userData?.tick === 'function') {
             currentModelRef.current.userData.tick(scaledDt, animElapsedRef.current);
+          } else if (typeof currentModelRef.current.userData?.update === 'function') {
+            currentModelRef.current.userData.update(scaledDt, animElapsedRef.current);
           }
         } catch (e) {
           // suppress runtime animation errors
@@ -487,8 +489,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         }
       }
 
-      // Pattern D: Fallback single anonymous tick
-      if (detectedNames.length === 0 && typeof model.userData?.tick === 'function') {
+      // Pattern D: Fallback single anonymous tick / update
+      if (
+        detectedNames.length === 0 &&
+        (typeof model.userData?.tick === 'function' || typeof model.userData?.update === 'function')
+      ) {
         addDetected('Default');
       }
 

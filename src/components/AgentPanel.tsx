@@ -186,6 +186,44 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
     setModelsFetchSuccess(null);
   }, [provider]);
 
+  const codeRef = useRef<string>(code);
+  const onCodeChangeRef = useRef(onCodeChange);
+
+  useEffect(() => {
+    codeRef.current = code;
+  }, [code]);
+
+  useEffect(() => {
+    onCodeChangeRef.current = onCodeChange;
+  }, [onCodeChange]);
+
+  // Sync locally generated or edited code back to the active MCP session so polling
+  // and render uploads never overwrite local work with an older/empty session state.
+  const syncLocalCodeToSession = async (newCode: string, title?: string) => {
+    const cleanToken = sessionId.trim();
+    if (!cleanToken) return;
+    const optimisticTs = Date.now();
+    if (optimisticTs > lastRemoteUpdatedAtRef.current) {
+      lastRemoteUpdatedAtRef.current = optimisticTs;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(cleanToken)}/code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: newCode, title: title || 'Procedural 3D Asset' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const savedTs = Number(data.session?.codeUpdatedAt || data.session?.updatedAt || 0);
+        if (savedTs > lastRemoteUpdatedAtRef.current) {
+          lastRemoteUpdatedAtRef.current = savedTs;
+        }
+      }
+    } catch {
+      // ignore session sync errors
+    }
+  };
+
   // Sync editorText when code changes externally
   useEffect(() => {
     setEditorText(code);
@@ -210,10 +248,18 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           const data = await res.json();
           const remote = data.session;
           if (remote && typeof remote.code === 'string') {
-            const remoteUpdatedAt = Number(remote.updatedAt || 0);
-            if (remoteUpdatedAt > lastRemoteUpdatedAtRef.current && remote.code !== code) {
-              lastRemoteUpdatedAtRef.current = remoteUpdatedAt;
-              onCodeChange(remote.code);
+            // Only treat remote as a code update when codeUpdatedAt advanced
+            // (screenshot uploads bump updatedAt but NOT codeUpdatedAt).
+            const remoteCodeUpdatedAt =
+              typeof remote.codeUpdatedAt === 'number'
+                ? remote.codeUpdatedAt
+                : remote.code.trim().length > 0
+                  ? Number(remote.updatedAt || 0)
+                  : 0;
+
+            if (remoteCodeUpdatedAt > lastRemoteUpdatedAtRef.current && remote.code !== codeRef.current) {
+              lastRemoteUpdatedAtRef.current = remoteCodeUpdatedAt;
+              onCodeChangeRef.current(remote.code);
             }
           }
         }
@@ -225,7 +271,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
     pollSession();
     const interval = setInterval(pollSession, 2000);
     return () => clearInterval(interval);
-  }, [autoPoll, sessionId, code, onCodeChange]);
+  }, [autoPoll, sessionId]);
 
   const handleCopyText = async (field: string, value: string) => {
     try {
@@ -357,12 +403,19 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
       }
 
       const data = await res.json();
-      if (data.code) {
+      setUsedSkills(data.appliedSkills || []);
+      setCurrentStage(null);
+
+      if (typeof data.code === 'string' && data.code.trim()) {
         onCodeChange(data.code);
         setEditorText(data.code);
         setAgentAnalysis(data.analysis || 'Model generated successfully.');
-        setUsedSkills(data.appliedSkills || []);
-        setCurrentStage(null);
+        syncLocalCodeToSession(data.code, prompt.trim().slice(0, 60) || 'Procedural 3D Model');
+      } else {
+        setAgentAnalysis(data.analysis || null);
+        setErrorMessage(
+          'The model responded without executable Three.js code. Check Sculpt Notes or retry with a clearer prompt.'
+        );
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Generation error');
@@ -952,6 +1005,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   onClick={() => {
                     onCodeChange('');
                     setEditorText('');
+                    syncLocalCodeToSession('', 'Workspace');
                   }}
                   className="text-[10px] text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-300 transition-colors"
                 >
@@ -982,7 +1036,10 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
             {/* Apply Button */}
             <button
               type="button"
-              onClick={() => onCodeChange(editorText)}
+              onClick={() => {
+                onCodeChange(editorText);
+                syncLocalCodeToSession(editorText, 'Custom 3D Model');
+              }}
               className="w-full bg-neutral-950 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-950 font-medium py-2 rounded-md shadow-sm flex items-center justify-center space-x-1.5 text-xs transition-colors"
             >
               <Play className="w-3.5 h-3.5" />

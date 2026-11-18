@@ -3,6 +3,8 @@ export interface SessionState {
   code: string;
   title: string;
   updatedAt: number;
+  codeUpdatedAt?: number;
+  renderUpdatedAt?: number;
   latestRender?: string;
 }
 
@@ -97,12 +99,14 @@ export class SessionStore {
       updatedAt: Date.now(),
     };
 
+    const now = Date.now();
     const updated: SessionState = {
       ...existing,
       id,
       code,
       title: title || existing.title || 'Procedural 3D Asset',
-      updatedAt: Date.now(),
+      updatedAt: now,
+      codeUpdatedAt: now,
     };
 
     this.memoryMap.set(id, updated);
@@ -131,11 +135,15 @@ export class SessionStore {
       updatedAt: Date.now(),
     };
 
+    const now = Date.now();
     const updated: SessionState = {
       ...existing,
       id,
       latestRender: screenshot,
-      updatedAt: Date.now(),
+      updatedAt: now,
+      renderUpdatedAt: now,
+      // Explicitly preserve existing codeUpdatedAt (do NOT bump it on render upload)
+      codeUpdatedAt: existing.codeUpdatedAt ?? 0,
     };
 
     this.memoryMap.set(id, updated);
@@ -155,11 +163,13 @@ export class SessionStore {
     const id = sanitizeSessionToken(rawToken);
     if (!id) return;
 
+    const now = Date.now();
     const cleared: SessionState = {
       id,
       title: 'Workspace',
       code: '',
-      updatedAt: Date.now(),
+      updatedAt: now,
+      codeUpdatedAt: now,
       latestRender: undefined,
     };
 

@@ -185,13 +185,37 @@ function extractKeyDirectives(skillId: string, body: string): string {
   return `### SKILL: ${skillId}\n${lines}\n${codeBlocks.length > 0 ? '```typescript\n' + codeBlocks.join('\n\n') + '\n```' : ''}`;
 }
 
+const QUERY_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'onto', 'over', 'under', 'like',
+  'more', 'most', 'very', 'just', 'make', 'create', 'build', 'generate', 'design', 'model',
+  'object', 'asset', 'scene', 'three', 'threejs', '3d', 'image', 'picture', 'photo', 'reference',
+  'strictly', 'accurate', 'accurately', 'exactly', 'realistic', 'stylized', 'please', 'using',
+  'want', 'need', 'should', 'would', 'could', 'have', 'has', 'are', 'was', 'were', 'been',
+  'being', 'also', 'some', 'such', 'than', 'then', 'them', 'they', 'their', 'there', 'here',
+  'when', 'where', 'what', 'which', 'who', 'how', 'can', 'will', 'all', 'any', 'but', 'not',
+  'you', 'your', 'our', 'its', 'out', 'off', 'add', 'give', 'show', 'look', 'looks', 'looking',
+]);
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasWordMatch(haystack: string, term: string): boolean {
+  if (!term) return false;
+  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}([^a-z0-9]|$)`, 'i').test(haystack);
+}
+
 /**
  * Selects the most relevant skills based on user prompt/topic and procedural modeling requirements.
- * Scores all installed skills by id, name, category, and description while keeping top matches compact.
+ * Scores all installed skills by word-boundary matches on id, name, category, and description.
  */
-export function getRelevantSkills(userPrompt: string, maxSkills: number = 8): { skills: ThreeJsSkill[]; names: string[] } {
+export function getRelevantSkills(
+  userPrompt: string,
+  maxSkills: number = 8,
+  hasImage: boolean = false
+): { skills: ThreeJsSkill[]; names: string[] } {
   const all = getAllSkills();
-  const query = userPrompt.trim().toLowerCase();
+  const query = (userPrompt || '').trim().toLowerCase();
 
   // Exact ID match first (useful when MCP callers query a specific skill id)
   const exact = all.get(query);
@@ -199,12 +223,15 @@ export function getRelevantSkills(userPrompt: string, maxSkills: number = 8): { 
     return { skills: [exact], names: [exact.id] };
   }
 
-  const terms = query
+  const rawTerms = query
     .split(/[^a-z0-9-]+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 2);
+    .filter((t) => t.length >= 3 && !QUERY_STOPWORDS.has(t));
 
-  // Score every installed skill against query terms
+  // Deduplicate query terms
+  const terms = Array.from(new Set(rawTerms));
+
+  // Score every installed skill against meaningful domain terms using whole-word matching
   const scored: { skill: ThreeJsSkill; score: number }[] = [];
   for (const skill of all.values()) {
     let score = 0;
@@ -213,14 +240,13 @@ export function getRelevantSkills(userPrompt: string, maxSkills: number = 8): { 
     const catL = skill.category.toLowerCase();
     const descL = skill.description.toLowerCase();
 
-    if (query && idL.includes(query)) score += 20;
-    if (query && nameL.includes(query)) score += 15;
+    if (query.length >= 4 && !QUERY_STOPWORDS.has(query) && idL.includes(query)) score += 20;
 
     for (const term of terms) {
-      if (idL.includes(term)) score += 8;
-      if (nameL.includes(term)) score += 6;
-      if (catL.includes(term)) score += 4;
-      if (descL.includes(term)) score += 3;
+      if (hasWordMatch(idL, term)) score += 10;
+      if (hasWordMatch(nameL, term)) score += 8;
+      if (hasWordMatch(catL, term)) score += 5;
+      if (hasWordMatch(descL, term)) score += 3;
     }
 
     if (score > 0) {
@@ -232,19 +258,36 @@ export function getRelevantSkills(userPrompt: string, maxSkills: number = 8): { 
 
   const selected = new Map<string, ThreeJsSkill>();
 
-  // Add top query-matched skills first
-  for (const item of scored.slice(0, maxSkills)) {
-    selected.set(item.skill.id, item.skill);
+  // When a reference image is provided, prioritize procedural image-to-3D sculpting skills first
+  if (hasImage) {
+    for (const id of ['threejs-object-sculptor', 'img2threejs']) {
+      const s = all.get(id);
+      if (s) selected.set(id, s);
+    }
   }
 
-  // Ensure core procedural baseline skills are present when space allows or when prompt is general
-  const baseline = ['threejs-geometry', 'threejs-materials', 'threejs-textures', 'threejs-animation', 'threejs-performance'];
+  // Always include core procedural baseline skills for reliable Three.js generation
+  const baseline = ['threejs-geometry', 'threejs-materials', 'threejs-textures', 'threejs-animation'];
   for (const id of baseline) {
     if (selected.size >= maxSkills) break;
     const skill = all.get(id);
     if (skill && !selected.has(id)) {
       selected.set(id, skill);
     }
+  }
+
+  // Fill remaining slots with top domain-matched skills
+  for (const item of scored) {
+    if (selected.size >= maxSkills) break;
+    if (!selected.has(item.skill.id)) {
+      selected.set(item.skill.id, item.skill);
+    }
+  }
+
+  // Fill with performance skill if room remains
+  if (selected.size < maxSkills) {
+    const perf = all.get('threejs-performance');
+    if (perf && !selected.has(perf.id)) selected.set(perf.id, perf);
   }
 
   const result = Array.from(selected.values());
@@ -257,8 +300,11 @@ export function getRelevantSkills(userPrompt: string, maxSkills: number = 8): { 
 /**
  * Builds the comprehensive, skill-enriched prompt injected into every AI agent request.
  */
-export function buildEnrichedSystemPrompt(userPrompt: string): { prompt: string; appliedSkills: string[] } {
-  const { skills, names } = getRelevantSkills(userPrompt);
+export function buildEnrichedSystemPrompt(
+  userPrompt: string,
+  hasImage: boolean = false
+): { prompt: string; appliedSkills: string[] } {
+  const { skills, names } = getRelevantSkills(userPrompt, 7, hasImage);
 
   const skillsKnowledge = skills
     .map((s) => `#### Skill Module: ${s.name} (${s.id})\n${s.keyDirectives}`)

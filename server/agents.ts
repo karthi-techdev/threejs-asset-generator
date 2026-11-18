@@ -33,15 +33,48 @@ export interface FetchModelsRequest {
 
 /**
  * Strips markdown code blocks and returns clean Three.js TypeScript code.
+ * Handles multiple blocks (prefers the one defining createModel), unclosed fences, and bare code.
  */
 export function extractCodeBlock(text: string): { code: string; analysis: string } {
-  const match = text.match(/```(?:typescript|javascript|ts|js)?\s*([\s\S]*?)```/);
-  if (match) {
-    const code = match[1].trim();
-    const analysis = text.replace(/```(?:typescript|javascript|ts|js)?\s*[\s\S]*?```/, '').trim();
-    return { code, analysis };
+  const raw = (text || '').trim();
+  if (!raw) {
+    return { code: '', analysis: 'Model returned an empty response.' };
   }
-  return { code: text.trim(), analysis: 'Direct code output.' };
+
+  // Collect all closed fenced code blocks
+  const blockRegex = /```(?:typescript|javascript|tsx|jsx|ts|js)?\s*\r?\n?([\s\S]*?)```/gi;
+  const blocks: { full: string; code: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = blockRegex.exec(raw)) !== null) {
+    const candidate = m[1].trim();
+    if (candidate) {
+      blocks.push({ full: m[0], code: candidate });
+    }
+  }
+
+  if (blocks.length > 0) {
+    // Prefer the block defining createModel (or the longest code block)
+    const best =
+      blocks.find((b) => /\bcreateModel\b/.test(b.code)) ||
+      blocks.reduce((a, b) => (b.code.length > a.code.length ? b : a));
+    const analysis = raw.replace(best.full, '').trim();
+    return { code: best.code, analysis };
+  }
+
+  // Handle an unclosed opening markdown fence (e.g. truncated response)
+  const unclosedMatch = raw.match(/```(?:typescript|javascript|tsx|jsx|ts|js)?\s*\r?\n?([\s\S]+)$/i);
+  if (unclosedMatch) {
+    const code = unclosedMatch[1].trim();
+    const analysis = raw.slice(0, unclosedMatch.index).trim();
+    return { code, analysis: analysis || 'Code extracted from response.' };
+  }
+
+  // Bare code output without fences
+  if (/\b(export\s+)?function\s+createModel\b/.test(raw) || /\bTHREE\.\w+/.test(raw)) {
+    return { code: raw, analysis: 'Direct code output.' };
+  }
+
+  return { code: '', analysis: raw };
 }
 
 /**
@@ -55,7 +88,7 @@ async function callGemini(req: GenerateRequest): Promise<AgentResult> {
   const baseUrl = (req.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
   const url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt);
+  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, Boolean(req.image));
   const parts: any[] = [{ text: systemPrompt }];
 
   if (req.currentCode) {
@@ -105,7 +138,7 @@ async function callClaude(req: GenerateRequest): Promise<AgentResult> {
   const baseUrl = (req.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
   const url = `${baseUrl}/v1/messages`;
 
-  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt);
+  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, Boolean(req.image));
 
   const content: any[] = [];
 
@@ -200,7 +233,7 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
-  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt);
+  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, Boolean(req.image));
 
   const res = await fetch(url, {
     method: 'POST',
@@ -238,11 +271,15 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
 
       if (fallbackRes.ok) {
         const fallbackData = await fallbackRes.json();
-        const textOutput = fallbackData.choices?.[0]?.message?.content || '';
+        const fallbackMsg = fallbackData.choices?.[0]?.message;
+        const textOutput =
+          (typeof fallbackMsg?.content === 'string' && fallbackMsg.content.trim()
+            ? fallbackMsg.content
+            : fallbackMsg?.reasoning_content || fallbackMsg?.reasoning || '') || '';
         const { code, analysis } = extractCodeBlock(textOutput);
         return {
           code,
-          analysis: `[Notice: ${model} is a text/code model that does not process images directly. Model was generated from your prompt and CloudAI-X Three.js skills.]\n\n${analysis}`,
+          analysis: `[Notice: ${model} is a text/code model that does not process images directly. Model was generated from your prompt and Three.js skills.]\n\n${analysis}`,
           provider: providerType,
           model,
           appliedSkills,
@@ -254,7 +291,11 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
   }
 
   const data = await res.json();
-  const textOutput = data.choices?.[0]?.message?.content || '';
+  const msg = data.choices?.[0]?.message;
+  const textOutput =
+    (typeof msg?.content === 'string' && msg.content.trim()
+      ? msg.content
+      : msg?.reasoning_content || msg?.reasoning || '') || '';
   const { code, analysis } = extractCodeBlock(textOutput);
 
   return { code, analysis, provider: providerType, model, appliedSkills };
