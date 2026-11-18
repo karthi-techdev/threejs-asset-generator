@@ -7,6 +7,7 @@
     "dev": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build && tsc -p tsconfig.server.json",
+    "prestart": "node -e \"const fs = require('fs'); if (!fs.existsSync('dist/server/index.js')) require('child_process').execSync('npm run build', { stdio: 'inherit' });\"",
     "start": "cross-env NODE_ENV=production node dist/server/index.js",
     "preview": "vite preview"
   },

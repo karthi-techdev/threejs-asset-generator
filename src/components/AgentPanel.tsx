@@ -24,8 +24,10 @@ import {
   Shuffle,
   Link2,
   Radio,
-  X
+  X,
+  Film
 } from 'lucide-react';
+import { formatAnimationLabel } from './Viewport3D';
 
 interface AgentPanelProps {
   code: string;
@@ -35,6 +37,9 @@ interface AgentPanelProps {
   activeTab: 'agent' | 'editor' | 'api';
   onTabChange: (tab: 'agent' | 'editor' | 'api') => void;
   codeError: string | null;
+  availableAnimations?: string[];
+  activeAnimation?: string | null;
+  onSelectAnimation?: (name: string) => void;
 }
 
 export type ProviderType = 'gemini' | 'claude' | 'openai' | 'ollama' | 'custom';
@@ -93,6 +98,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   activeTab,
   onTabChange,
   codeError,
+  availableAnimations = [],
+  activeAnimation = null,
+  onSelectAnimation,
 }) => {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const lastRemoteUpdatedAtRef = useRef<number>(0);
@@ -116,10 +124,13 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   const [modelsFetchSuccess, setModelsFetchSuccess] = useState<string | null>(null);
   const [manualModelMode, setManualModelMode] = useState(false);
 
-  // Skills Engine State (CloudAI-X/threejs-skills)
+  // Skills Engine State
   const [installedSkills, setInstalledSkills] = useState<InstalledSkill[]>([]);
   const [usedSkills, setUsedSkills] = useState<string[]>([]);
   const [showSkillsModal, setShowSkillsModal] = useState(false);
+  const [skillSearch, setSkillSearch] = useState('');
+  const [skillCategory, setSkillCategory] = useState<string>('All');
+  const [isLoadingSkills, setIsLoadingSkills] = useState(false);
 
   // Generator Execution State - no prefilled text
   const [prompt, setPrompt] = useState('');
@@ -136,14 +147,28 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   // Webhook / API auto-poll state
   const [autoPoll, setAutoPoll] = useState(true);
 
+  const loadInstalledSkills = async (forceRefresh: boolean = false) => {
+    setIsLoadingSkills(true);
+    try {
+      const res = await fetch(forceRefresh ? '/api/skills?refresh=1' : '/api/skills', {
+        cache: 'no-store',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.skills)) {
+          setInstalledSkills(data.skills);
+        }
+      }
+    } catch {
+      // ignore skills fetch errors
+    } finally {
+      setIsLoadingSkills(false);
+    }
+  };
+
   // Load Installed Skills from Backend on Mount
   useEffect(() => {
-    fetch('/api/skills')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.skills) setInstalledSkills(data.skills);
-      })
-      .catch(() => {});
+    loadInstalledSkills(false);
   }, []);
 
   // Load Provider Settings whenever provider changes
@@ -348,15 +373,15 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-neutral-950 border-l border-neutral-800 text-neutral-200 overflow-hidden font-sans">
+    <div className="w-full h-full flex flex-col bg-white dark:bg-neutral-950 border-l border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 overflow-hidden font-sans transition-colors">
       {/* Top Tabs - Flat, Simple, Elegant */}
-      <div className="flex border-b border-neutral-800 bg-neutral-950 text-xs font-medium">
+      <div className="flex border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 text-xs font-medium transition-colors">
         <button
           onClick={() => onTabChange('agent')}
           className={`flex-1 py-2.5 px-3 flex items-center justify-center space-x-1.5 border-b transition-colors ${
             activeTab === 'agent'
-              ? 'border-white text-white font-medium bg-neutral-900/40'
-              : 'border-transparent text-neutral-400 hover:text-neutral-200'
+              ? 'border-neutral-950 text-neutral-950 bg-neutral-100/70 dark:border-white dark:text-white dark:bg-neutral-900/40 font-medium'
+              : 'border-transparent text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200'
           }`}
         >
           <Bot className="w-3.5 h-3.5" />
@@ -367,8 +392,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           onClick={() => onTabChange('editor')}
           className={`flex-1 py-2.5 px-3 flex items-center justify-center space-x-1.5 border-b transition-colors ${
             activeTab === 'editor'
-              ? 'border-white text-white font-medium bg-neutral-900/40'
-              : 'border-transparent text-neutral-400 hover:text-neutral-200'
+              ? 'border-neutral-950 text-neutral-950 bg-neutral-100/70 dark:border-white dark:text-white dark:bg-neutral-900/40 font-medium'
+              : 'border-transparent text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200'
           }`}
         >
           <Code2 className="w-3.5 h-3.5" />
@@ -379,8 +404,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           onClick={() => onTabChange('api')}
           className={`flex-1 py-2.5 px-3 flex items-center justify-center space-x-1.5 border-b transition-colors ${
             activeTab === 'api'
-              ? 'border-white text-white font-medium bg-neutral-900/40'
-              : 'border-transparent text-neutral-400 hover:text-neutral-200'
+              ? 'border-neutral-950 text-neutral-950 bg-neutral-100/70 dark:border-white dark:text-white dark:bg-neutral-900/40 font-medium'
+              : 'border-transparent text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200'
           }`}
         >
           <Terminal className="w-3.5 h-3.5" />
@@ -397,7 +422,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           <div className="space-y-4 text-xs">
             {/* 1. Provider Selector */}
             <div className="space-y-1.5">
-              <label className="text-neutral-400 font-medium text-[11px] block">
+              <label className="text-neutral-600 dark:text-neutral-400 font-medium text-[11px] block">
                 Provider
               </label>
 
@@ -407,12 +432,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   onClick={() => setProvider('gemini')}
                   className={`p-2 rounded-md border flex flex-col items-start transition-colors ${
                     provider === 'gemini'
-                      ? 'border-neutral-400 bg-neutral-850 text-white font-medium'
-                      : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-300'
+                      ? 'border-neutral-900 bg-neutral-100 text-neutral-950 dark:border-neutral-400 dark:bg-neutral-800 dark:text-white font-medium'
+                      : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 dark:hover:border-neutral-700 dark:hover:text-neutral-300'
                   }`}
                 >
                   <div className="flex items-center space-x-1.5 mb-0.5">
-                    <Sparkles className="w-3 h-3 text-neutral-300" />
+                    <Sparkles className="w-3 h-3 text-neutral-600 dark:text-neutral-300" />
                     <span className="text-xs">Gemini</span>
                   </div>
                   <span className="text-[10px] text-neutral-500">Google AI</span>
@@ -423,12 +448,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   onClick={() => setProvider('claude')}
                   className={`p-2 rounded-md border flex flex-col items-start transition-colors ${
                     provider === 'claude'
-                      ? 'border-neutral-400 bg-neutral-850 text-white font-medium'
-                      : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-300'
+                      ? 'border-neutral-900 bg-neutral-100 text-neutral-950 dark:border-neutral-400 dark:bg-neutral-800 dark:text-white font-medium'
+                      : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 dark:hover:border-neutral-700 dark:hover:text-neutral-300'
                   }`}
                 >
                   <div className="flex items-center space-x-1.5 mb-0.5">
-                    <Cpu className="w-3 h-3 text-neutral-300" />
+                    <Cpu className="w-3 h-3 text-neutral-600 dark:text-neutral-300" />
                     <span className="text-xs">Claude</span>
                   </div>
                   <span className="text-[10px] text-neutral-500">Anthropic</span>
@@ -439,12 +464,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   onClick={() => setProvider('openai')}
                   className={`p-2 rounded-md border flex flex-col items-start transition-colors ${
                     provider === 'openai'
-                      ? 'border-neutral-400 bg-neutral-850 text-white font-medium'
-                      : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-300'
+                      ? 'border-neutral-900 bg-neutral-100 text-neutral-950 dark:border-neutral-400 dark:bg-neutral-800 dark:text-white font-medium'
+                      : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 dark:hover:border-neutral-700 dark:hover:text-neutral-300'
                   }`}
                 >
                   <div className="flex items-center space-x-1.5 mb-0.5">
-                    <Bot className="w-3 h-3 text-neutral-300" />
+                    <Bot className="w-3 h-3 text-neutral-600 dark:text-neutral-300" />
                     <span className="text-xs">OpenAI</span>
                   </div>
                   <span className="text-[10px] text-neutral-500">GPT-4o</span>
@@ -457,11 +482,11 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   onClick={() => setProvider('ollama')}
                   className={`p-2 rounded-md border flex items-center space-x-2 transition-colors ${
                     provider === 'ollama'
-                      ? 'border-neutral-400 bg-neutral-850 text-white font-medium'
-                      : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-300'
+                      ? 'border-neutral-900 bg-neutral-100 text-neutral-950 dark:border-neutral-400 dark:bg-neutral-800 dark:text-white font-medium'
+                      : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 dark:hover:border-neutral-700 dark:hover:text-neutral-300'
                   }`}
                 >
-                  <Server className="w-3.5 h-3.5 text-neutral-400 flex-shrink-0" />
+                  <Server className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400 flex-shrink-0" />
                   <div className="text-left">
                     <div className="text-xs">Ollama</div>
                     <div className="text-[10px] text-neutral-500">Self-Hosted</div>
@@ -473,11 +498,11 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   onClick={() => setProvider('custom')}
                   className={`p-2 rounded-md border flex items-center space-x-2 transition-colors ${
                     provider === 'custom'
-                      ? 'border-neutral-400 bg-neutral-850 text-white font-medium'
-                      : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-300'
+                      ? 'border-neutral-900 bg-neutral-100 text-neutral-950 dark:border-neutral-400 dark:bg-neutral-800 dark:text-white font-medium'
+                      : 'border-neutral-200 bg-neutral-50 text-neutral-600 hover:border-neutral-300 hover:text-neutral-900 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-400 dark:hover:border-neutral-700 dark:hover:text-neutral-300'
                   }`}
                 >
-                  <Globe className="w-3.5 h-3.5 text-neutral-400 flex-shrink-0" />
+                  <Globe className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400 flex-shrink-0" />
                   <div className="text-left">
                     <div className="text-xs">Custom API</div>
                     <div className="text-[10px] text-neutral-500">OpenAI Compatible</div>
@@ -487,12 +512,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
             </div>
 
             {/* 2. API Configuration (Key, URL, Model) */}
-            <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 space-y-3">
+            <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-3 space-y-3 transition-colors">
               {/* API Key */}
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
-                  <label className="text-neutral-300 text-[11px] font-medium flex items-center space-x-1.5">
-                    <Key className="w-3 h-3 text-neutral-400" />
+                  <label className="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium flex items-center space-x-1.5">
+                    <Key className="w-3 h-3 text-neutral-500 dark:text-neutral-400" />
                     <span>API Key</span>
                   </label>
                   {apiKey && (
@@ -506,12 +531,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     placeholder={PROVIDER_METADATA[provider].keyPlaceholder}
                     value={apiKey}
                     onChange={(e) => handleApiKeyChange(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-md pl-2.5 pr-8 py-1.5 text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-neutral-600 font-mono transition-colors"
+                    className="w-full bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md pl-2.5 pr-8 py-1.5 text-xs text-neutral-950 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 font-mono transition-colors"
                   />
                   <button
                     type="button"
                     onClick={() => setShowApiKey(!showApiKey)}
-                    className="absolute right-2 top-2 text-neutral-500 hover:text-neutral-300 transition-colors"
+                    className="absolute right-2 top-2 text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-300 transition-colors"
                     title={showApiKey ? 'Hide Key' : 'Show Key'}
                   >
                     {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -525,9 +550,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowCustomUrl(!showCustomUrl)}
-                    className="text-[11px] text-neutral-300 hover:text-white flex items-center space-x-1 font-medium transition-colors"
+                    className="text-[11px] text-neutral-700 hover:text-neutral-950 dark:text-neutral-300 dark:hover:text-white flex items-center space-x-1 font-medium transition-colors"
                   >
-                    <Globe className="w-3 h-3 text-neutral-400" />
+                    <Globe className="w-3 h-3 text-neutral-500 dark:text-neutral-400" />
                     <span>API URL</span>
                     <span className="text-[10px] text-neutral-500">
                       ({showCustomUrl || provider === 'custom' || provider === 'ollama' ? 'custom' : 'default'})
@@ -537,7 +562,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => handleBaseUrlChange('')}
-                      className="text-[10px] text-neutral-400 hover:text-white transition-colors"
+                      className="text-[10px] text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors"
                     >
                       Clear
                     </button>
@@ -550,16 +575,16 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     placeholder={PROVIDER_METADATA[provider].urlPlaceholder}
                     value={baseUrl}
                     onChange={(e) => handleBaseUrlChange(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-neutral-600 font-mono transition-colors"
+                    className="w-full bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-900 dark:text-neutral-200 placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 font-mono transition-colors"
                   />
                 )}
               </div>
 
               {/* Model Selection & Dynamic Fetch */}
-              <div className="space-y-1.5 pt-1 border-t border-neutral-800">
+              <div className="space-y-1.5 pt-1 border-t border-neutral-200 dark:border-neutral-800">
                 <div className="flex items-center justify-between">
-                  <label className="text-neutral-300 text-[11px] font-medium flex items-center space-x-1.5">
-                    <Sliders className="w-3 h-3 text-neutral-400" />
+                  <label className="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium flex items-center space-x-1.5">
+                    <Sliders className="w-3 h-3 text-neutral-500 dark:text-neutral-400" />
                     <span>Model</span>
                   </label>
 
@@ -567,7 +592,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => setManualModelMode(!manualModelMode)}
-                      className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
+                      className="text-[10px] text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors"
                     >
                       {manualModelMode ? 'List View' : 'Custom Model'}
                     </button>
@@ -576,7 +601,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                       type="button"
                       onClick={handleFetchModels}
                       disabled={isFetchingModels}
-                      className="bg-neutral-800 hover:bg-neutral-750 text-neutral-200 px-2 py-0.5 rounded text-[10px] font-medium flex items-center space-x-1 border border-neutral-750 transition-colors disabled:opacity-50"
+                      className="bg-white hover:bg-neutral-100 text-neutral-800 border border-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-200 dark:border-neutral-700 px-2 py-0.5 rounded text-[10px] font-medium flex items-center space-x-1 transition-colors disabled:opacity-50"
                     >
                       <RefreshCw className={`w-3 h-3 ${isFetchingModels ? 'animate-spin' : ''}`} />
                       <span>{isFetchingModels ? 'Fetching...' : 'Fetch Models'}</span>
@@ -586,15 +611,15 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
                 {/* Status indicator after fetch */}
                 {modelsFetchSuccess && (
-                  <div className="text-[10px] text-neutral-400 flex items-center space-x-1">
-                    <Check className="w-3 h-3 text-emerald-400" />
+                  <div className="text-[10px] text-neutral-600 dark:text-neutral-400 flex items-center space-x-1">
+                    <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                     <span>{modelsFetchSuccess}</span>
                   </div>
                 )}
 
                 {modelsFetchError && (
-                  <div className="text-[10px] text-neutral-300 bg-neutral-950 border border-neutral-800 rounded p-2 flex items-start space-x-1.5">
-                    <AlertCircle className="w-3.5 h-3.5 text-neutral-400 flex-shrink-0 mt-0.5" />
+                  <div className="text-[10px] text-neutral-700 dark:text-neutral-300 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded p-2 flex items-start space-x-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400 flex-shrink-0 mt-0.5" />
                     <span>{modelsFetchError}</span>
                   </div>
                 )}
@@ -605,13 +630,13 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     value={model}
                     onChange={(e) => handleModelChange(e.target.value)}
                     placeholder="Enter model ID (e.g. gpt-4o, claude-3-5-sonnet)"
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-neutral-600 font-mono transition-colors"
+                    className="w-full bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-950 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 font-mono transition-colors"
                   />
                 ) : availableModels.length > 0 ? (
                   <select
                     value={model}
                     onChange={(e) => handleModelChange(e.target.value)}
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-neutral-600 font-mono transition-colors"
+                    className="w-full bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-950 dark:text-white focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 font-mono transition-colors"
                   >
                     {availableModels.map((m) => (
                       <option key={m.id} value={m.id}>
@@ -626,13 +651,13 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                       value={model}
                       onChange={(e) => handleModelChange(e.target.value)}
                       placeholder="e.g. gpt-4o, gemini-1.5-flash"
-                      className="flex-1 bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-neutral-600 font-mono transition-colors"
+                      className="flex-1 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md px-2.5 py-1.5 text-xs text-neutral-950 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 font-mono transition-colors"
                     />
                     <button
                       type="button"
                       onClick={handleFetchModels}
                       disabled={isFetchingModels}
-                      className="bg-neutral-800 hover:bg-neutral-750 text-neutral-200 px-2.5 py-1.5 rounded-md text-xs font-medium border border-neutral-750 transition-colors whitespace-nowrap"
+                      className="bg-white hover:bg-neutral-100 text-neutral-800 border border-neutral-300 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-200 dark:border-neutral-700 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap"
                     >
                       Fetch List
                     </button>
@@ -641,52 +666,116 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
               </div>
             </div>
 
-            {/* 3. Three.js Skills Engine Indicator (CloudAI-X/threejs-skills) */}
-            <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 flex items-center justify-between text-[11px]">
+            {/* 3. Three.js Skills Engine Indicator */}
+            <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-2.5 flex items-center justify-between text-[11px] transition-colors">
               <div className="flex items-center space-x-2">
-                <BookOpen className="w-3.5 h-3.5 text-neutral-400" />
-                <span className="font-medium text-neutral-200">Three.js Skills Engine</span>
+                <BookOpen className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400" />
+                <span className="font-medium text-neutral-800 dark:text-neutral-200">Three.js Skills Engine</span>
               </div>
               <button
                 type="button"
                 onClick={() => setShowSkillsModal(!showSkillsModal)}
-                className="text-[10px] text-neutral-400 hover:text-white transition-colors underline"
+                className="text-[10px] text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors underline"
               >
-                {installedSkills.length || 13} Skills Active
+                {installedSkills.length} Skills Active
               </button>
             </div>
 
             {/* Expandable Skills List Modal / Drawer */}
-            {showSkillsModal && (
-              <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 space-y-2">
-                <div className="flex items-center justify-between text-xs font-medium border-b border-neutral-800 pb-1.5">
-                  <span className="text-neutral-200">CloudAI-X Three.js Skills</span>
-                  <button
-                    type="button"
-                    onClick={() => setShowSkillsModal(false)}
-                    className="text-neutral-500 hover:text-neutral-300"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 text-[10px]">
-                  {installedSkills.map((s) => (
-                    <div key={s.id} className="border-b border-neutral-850 pb-1">
-                      <div className="font-mono text-neutral-300 font-medium">{s.id}</div>
-                      <div className="text-neutral-500 truncate">{s.description}</div>
+            {showSkillsModal && (() => {
+              const categories = ['All', ...Array.from(new Set(installedSkills.map((s) => s.category))).sort()];
+              const q = skillSearch.trim().toLowerCase();
+              const filteredSkills = installedSkills.filter((s) => {
+                if (skillCategory !== 'All' && s.category !== skillCategory) return false;
+                if (!q) return true;
+                return (
+                  s.id.toLowerCase().includes(q) ||
+                  s.name.toLowerCase().includes(q) ||
+                  s.category.toLowerCase().includes(q) ||
+                  s.description.toLowerCase().includes(q)
+                );
+              });
+
+              return (
+                <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-3 space-y-2 transition-colors">
+                  <div className="flex items-center justify-between text-xs font-medium border-b border-neutral-200 dark:border-neutral-800 pb-1.5">
+                    <span className="text-neutral-900 dark:text-neutral-200">
+                      Three.js Skills Library ({filteredSkills.length}/{installedSkills.length})
+                    </span>
+                    <div className="flex items-center space-x-1.5">
+                      <button
+                        type="button"
+                        onClick={() => loadInstalledSkills(true)}
+                        disabled={isLoadingSkills}
+                        title="Reload skills from disk"
+                        className="text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200 p-0.5 transition-colors disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isLoadingSkills ? 'animate-spin' : ''}`} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowSkillsModal(false)}
+                        className="text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-300"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                  ))}
+                  </div>
+
+                  {/* Search & Category Filter */}
+                  <div className="flex items-center space-x-1.5">
+                    <input
+                      type="text"
+                      value={skillSearch}
+                      onChange={(e) => setSkillSearch(e.target.value)}
+                      placeholder="Search skills (e.g. ocean, shader, r3f)..."
+                      className="flex-1 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded px-2 py-1 text-[11px] text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600"
+                    />
+                    <select
+                      value={skillCategory}
+                      onChange={(e) => setSkillCategory(e.target.value)}
+                      className="bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded px-1.5 py-1 text-[10px] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600"
+                    >
+                      {categories.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="max-h-60 overflow-y-auto space-y-1.5 pr-1 text-[10px]">
+                    {filteredSkills.length > 0 ? (
+                      filteredSkills.map((s) => (
+                        <div key={s.id} className="border-b border-neutral-200 dark:border-neutral-800 pb-1.5 last:border-b-0">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono text-neutral-800 dark:text-neutral-200 font-medium truncate">
+                              {s.id}
+                            </span>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-200/80 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-400 flex-shrink-0">
+                              {s.category}
+                            </span>
+                          </div>
+                          {s.description && (
+                            <div className="text-neutral-500 line-clamp-2 mt-0.5">{s.description}</div>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-neutral-500 text-center py-4">No matching skills found.</div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Reference Image Dropzone */}
             <div className="space-y-1">
-              <label className="text-neutral-400 font-medium text-[11px] block">
+              <label className="text-neutral-600 dark:text-neutral-400 font-medium text-[11px] block">
                 Reference Image
               </label>
 
-              <div className="border border-neutral-800 hover:border-neutral-700 rounded-lg p-3 text-center transition-colors bg-neutral-900/40">
+              <div className="border border-neutral-200 hover:border-neutral-300 dark:border-neutral-800 dark:hover:border-neutral-700 rounded-lg p-3 text-center transition-colors bg-neutral-50 dark:bg-neutral-900/40">
                 {imagePreview ? (
                   <div className="relative group">
                     <img
@@ -697,15 +786,15 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => setImagePreview(null)}
-                      className="absolute top-1 right-1 bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 text-[10px] px-2 py-0.5 rounded shadow"
+                      className="absolute top-1 right-1 bg-white/95 hover:bg-neutral-100 border border-neutral-200 text-neutral-800 dark:bg-neutral-900/90 dark:hover:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-200 text-[10px] px-2 py-0.5 rounded shadow"
                     >
                       Clear
                     </button>
                   </div>
                 ) : (
                   <label className="cursor-pointer block py-3">
-                    <Upload className="w-5 h-5 mx-auto text-neutral-500 mb-1" />
-                    <span className="text-neutral-300 text-xs font-normal">Click or drag image to sculpt</span>
+                    <Upload className="w-5 h-5 mx-auto text-neutral-400 dark:text-neutral-500 mb-1" />
+                    <span className="text-neutral-700 dark:text-neutral-300 text-xs font-normal">Click or drag image to sculpt</span>
                     <span className="block text-[10px] text-neutral-500 mt-0.5">PNG, JPG, WebP</span>
                     <input
                       type="file"
@@ -718,15 +807,15 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
               </div>
 
               {imagePreview && (
-                <div className="flex items-center space-x-1.5 pt-1 text-[11px] text-neutral-400">
+                <div className="flex items-center space-x-1.5 pt-1 text-[11px] text-neutral-600 dark:text-neutral-400">
                   <input
                     type="checkbox"
                     id="sendImage"
                     checked={sendImageToModel}
                     onChange={(e) => setSendImageToModel(e.target.checked)}
-                    className="rounded bg-neutral-950 border-neutral-800 text-white focus:ring-0 cursor-pointer"
+                    className="rounded bg-white dark:bg-neutral-950 border-neutral-300 dark:border-neutral-800 text-neutral-950 dark:text-white focus:ring-0 cursor-pointer"
                   />
-                  <label htmlFor="sendImage" className="cursor-pointer text-[10px] text-neutral-400 select-none">
+                  <label htmlFor="sendImage" className="cursor-pointer text-[10px] text-neutral-600 dark:text-neutral-400 select-none">
                     Send image payload (uncheck if using text/code-only model)
                   </label>
                 </div>
@@ -735,7 +824,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
             {/* Prompt Field */}
             <div className="space-y-1">
-              <label className="text-neutral-400 font-medium text-[11px] block">
+              <label className="text-neutral-600 dark:text-neutral-400 font-medium text-[11px] block">
                 Sculpting Prompt
               </label>
               <textarea
@@ -743,32 +832,32 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                 placeholder="Describe the 3D model to sculpt..."
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-md p-2.5 text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-neutral-600 resize-none transition-colors"
+                className="w-full bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md p-2.5 text-xs text-neutral-950 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 resize-none transition-colors"
               />
             </div>
 
             {/* Error Banner */}
             {errorMessage && (
-              <div className="bg-neutral-950 border border-neutral-800 rounded-md p-2.5 text-neutral-300 flex items-start space-x-2">
-                <AlertCircle className="w-4 h-4 text-neutral-400 flex-shrink-0 mt-0.5" />
+              <div className="bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md p-2.5 text-neutral-800 dark:text-neutral-300 flex items-start space-x-2">
+                <AlertCircle className="w-4 h-4 text-neutral-500 dark:text-neutral-400 flex-shrink-0 mt-0.5" />
                 <span className="text-[11px]">{errorMessage}</span>
               </div>
             )}
 
             {/* Current Stage Indicator */}
             {currentStage && (
-              <div className="bg-neutral-900 border border-neutral-800 rounded-md p-2.5 text-neutral-300 flex items-center space-x-2">
-                <RefreshCw className="w-3.5 h-3.5 text-neutral-400 animate-spin" />
+              <div className="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-md p-2.5 text-neutral-800 dark:text-neutral-300 flex items-center space-x-2">
+                <RefreshCw className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400 animate-spin" />
                 <span className="text-xs">{currentStage}</span>
               </div>
             )}
 
-            {/* Generate Button - Flat Solid White */}
+            {/* Generate Button - Flat Solid Monochrome */}
             <button
               type="button"
               onClick={handleGenerate}
               disabled={isLoading}
-              className="w-full bg-white hover:bg-neutral-200 disabled:bg-neutral-800 disabled:text-neutral-500 disabled:cursor-not-allowed text-neutral-950 font-medium py-2 rounded-md shadow-sm flex items-center justify-center space-x-2 transition-colors"
+              className="w-full bg-neutral-950 hover:bg-neutral-800 disabled:bg-neutral-200 disabled:text-neutral-400 text-white dark:bg-white dark:hover:bg-neutral-200 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-500 disabled:cursor-not-allowed dark:text-neutral-950 font-medium py-2 rounded-md shadow-sm flex items-center justify-center space-x-2 transition-colors"
             >
               {isLoading ? (
                 <>
@@ -783,23 +872,58 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
               )}
             </button>
 
+            {/* Available Model Animations Card (Synced with 3D Viewport) */}
+            {availableAnimations.length > 0 && (
+              <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-md p-3 space-y-2 transition-colors">
+                <div className="flex items-center justify-between text-[11px]">
+                  <div className="flex items-center space-x-1.5 font-medium text-neutral-800 dark:text-neutral-200">
+                    <Film className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400" />
+                    <span>Available Animations</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-neutral-500">
+                    {availableAnimations.length} {availableAnimations.length === 1 ? 'clip' : 'clips'}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {availableAnimations.map((animName) => {
+                    const isSelected = activeAnimation === animName;
+                    return (
+                      <button
+                        key={animName}
+                        type="button"
+                        onClick={() => onSelectAnimation?.(animName)}
+                        className={`px-2.5 py-1 rounded text-[11px] border transition-colors ${
+                          isSelected
+                            ? 'bg-neutral-950 border-neutral-950 text-white dark:bg-white dark:border-white dark:text-neutral-950 font-medium'
+                            : 'bg-white hover:bg-neutral-100 border-neutral-200 text-neutral-700 dark:bg-neutral-950 dark:hover:bg-neutral-800 dark:border-neutral-800 dark:text-neutral-300'
+                        }`}
+                      >
+                        {formatAnimationLabel(animName)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Agent Visual Analysis Output & Applied Skills */}
             {agentAnalysis && (
-              <div className="bg-neutral-900 border border-neutral-800 rounded-md p-3 space-y-2 mt-2">
-                <div className="text-[11px] font-medium text-neutral-300 flex items-center justify-between">
+              <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-md p-3 space-y-2 mt-2">
+                <div className="text-[11px] font-medium text-neutral-800 dark:text-neutral-300 flex items-center justify-between">
                   <div className="flex items-center space-x-1.5">
-                    <FileCode className="w-3.5 h-3.5 text-neutral-400" />
+                    <FileCode className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400" />
                     <span>Sculpt Notes</span>
                   </div>
                 </div>
 
                 {/* Applied Skills Pills */}
                 {usedSkills.length > 0 && (
-                  <div className="space-y-1 pt-1 border-t border-neutral-800">
+                  <div className="space-y-1 pt-1 border-t border-neutral-200 dark:border-neutral-800">
                     <div className="text-[10px] text-neutral-500 font-medium">Applied Three.js Skills:</div>
                     <div className="flex flex-wrap gap-1">
                       {usedSkills.map((sk) => (
-                        <span key={sk} className="bg-neutral-950 border border-neutral-750 text-neutral-300 px-1.5 py-0.5 rounded text-[10px] font-mono">
+                        <span key={sk} className="bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 px-1.5 py-0.5 rounded text-[10px] font-mono">
                           {sk}
                         </span>
                       ))}
@@ -807,7 +931,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   </div>
                 )}
 
-                <div className="text-[11px] text-neutral-400 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+                <div className="text-[11px] text-neutral-600 dark:text-neutral-400 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
                   {agentAnalysis}
                 </div>
               </div>
@@ -821,7 +945,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
         {activeTab === 'editor' && (
           <div className="h-full flex flex-col space-y-3">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-neutral-400 text-[11px] font-medium">Three.js Script (TypeScript)</span>
+              <span className="text-neutral-600 dark:text-neutral-400 text-[11px] font-medium">Three.js Script (TypeScript)</span>
               {code && (
                 <button
                   type="button"
@@ -829,7 +953,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     onCodeChange('');
                     setEditorText('');
                   }}
-                  className="text-[10px] text-neutral-500 hover:text-neutral-300 transition-colors"
+                  className="text-[10px] text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-300 transition-colors"
                 >
                   Clear Code
                 </button>
@@ -838,8 +962,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
             {/* Error Alert if code breaks */}
             {codeError && (
-              <div className="bg-neutral-950 border border-neutral-800 rounded-md p-2 text-neutral-300 text-xs flex items-center space-x-2">
-                <AlertCircle className="w-3.5 h-3.5 text-neutral-400 flex-shrink-0" />
+              <div className="bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md p-2 text-neutral-800 dark:text-neutral-300 text-xs flex items-center space-x-2">
+                <AlertCircle className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400 flex-shrink-0" />
                 <span className="font-mono text-[11px] truncate">{codeError}</span>
               </div>
             )}
@@ -851,7 +975,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                 onChange={(e) => setEditorText(e.target.value)}
                 placeholder="import * as THREE from 'three';&#10;&#10;export function createModel(): THREE.Group {&#10;  const group = new THREE.Group();&#10;  // write procedural geometry here&#10;  return group;&#10;}"
                 spellCheck={false}
-                className="w-full flex-1 bg-neutral-950 border border-neutral-800 rounded-md p-3 text-xs font-mono text-neutral-200 placeholder-neutral-700 leading-relaxed focus:outline-none focus:border-neutral-700 resize-none overflow-auto"
+                className="w-full flex-1 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md p-3 text-xs font-mono text-neutral-900 dark:text-neutral-200 placeholder-neutral-400 dark:placeholder-neutral-700 leading-relaxed focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-700 resize-none overflow-auto transition-colors"
               />
             </div>
 
@@ -859,7 +983,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
             <button
               type="button"
               onClick={() => onCodeChange(editorText)}
-              className="w-full bg-white hover:bg-neutral-200 text-neutral-950 font-medium py-2 rounded-md shadow-sm flex items-center justify-center space-x-1.5 text-xs transition-colors"
+              className="w-full bg-neutral-950 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-950 font-medium py-2 rounded-md shadow-sm flex items-center justify-center space-x-1.5 text-xs transition-colors"
             >
               <Play className="w-3.5 h-3.5" />
               <span>Apply & Run in Viewport</span>
@@ -891,18 +1015,18 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           return (
             <div className="space-y-4 text-xs">
               {/* Session Token Card */}
-              <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 space-y-3">
+              <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-3 space-y-3 transition-colors">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-1.5 font-medium text-white text-xs">
-                    <KeyRound className="w-3.5 h-3.5 text-neutral-300" />
+                  <div className="flex items-center space-x-1.5 font-medium text-neutral-950 dark:text-white text-xs">
+                    <KeyRound className="w-3.5 h-3.5 text-neutral-600 dark:text-neutral-300" />
                     <span>MCP Session Token</span>
                   </div>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-950 border border-neutral-800 text-neutral-400">
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 text-neutral-600 dark:text-neutral-400">
                     HTTPS JSON-RPC · No SSE
                   </span>
                 </div>
 
-                <p className="text-[11px] text-neutral-400 leading-relaxed">
+                <p className="text-[11px] text-neutral-600 dark:text-neutral-400 leading-relaxed">
                   Create a custom session token to bind your web chat agent or coding agent to this live 3D viewport. Saved locally in your browser.
                 </p>
 
@@ -915,13 +1039,13 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                       onChange={(e) => onSessionIdChange(e.target.value)}
                       placeholder="Enter custom token (e.g. example-session)"
                       spellCheck={false}
-                      className="flex-1 bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-1.5 text-xs font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-neutral-600"
+                      className="flex-1 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md px-2.5 py-1.5 text-xs font-mono text-neutral-950 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 transition-colors"
                     />
                     <button
                       type="button"
                       onClick={handleGenerateToken}
                       title="Generate Random Session Token"
-                      className="flex items-center space-x-1 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 px-2.5 py-1.5 rounded-md text-[11px] font-medium transition-colors"
+                      className="flex items-center space-x-1 bg-white hover:bg-neutral-100 border border-neutral-200 text-neutral-800 dark:bg-neutral-950 dark:hover:bg-neutral-800 dark:border-neutral-800 dark:text-neutral-200 px-2.5 py-1.5 rounded-md text-[11px] font-medium transition-colors"
                     >
                       <Shuffle className="w-3 h-3" />
                       <span>Generate</span>
@@ -931,7 +1055,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                         type="button"
                         onClick={() => onSessionIdChange('')}
                         title="Clear Session Token"
-                        className="p-1.5 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-white rounded-md transition-colors"
+                        className="p-1.5 bg-white hover:bg-neutral-100 border border-neutral-200 text-neutral-500 hover:text-neutral-950 dark:bg-neutral-950 dark:hover:bg-neutral-800 dark:border-neutral-800 dark:text-neutral-400 dark:hover:text-white rounded-md transition-colors"
                       >
                         <X className="w-3.5 h-3.5" />
                       </button>
@@ -940,19 +1064,19 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
                   {/* Live Sync Status & Toggle */}
                   <div className="flex items-center justify-between pt-1">
-                    <label className="text-[11px] text-neutral-300 flex items-center space-x-1.5 cursor-pointer">
+                    <label className="text-[11px] text-neutral-700 dark:text-neutral-300 flex items-center space-x-1.5 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={autoPoll}
                         onChange={(e) => setAutoPoll(e.target.checked)}
-                        className="rounded bg-neutral-950 border-neutral-800 text-neutral-200 focus:ring-0"
+                        className="rounded bg-white dark:bg-neutral-950 border-neutral-300 dark:border-neutral-800 text-neutral-900 dark:text-neutral-200 focus:ring-0"
                       />
                       <span>Auto-sync viewport with MCP pushes</span>
                     </label>
 
                     <span className="flex items-center space-x-1 text-[10px] font-mono">
-                      <Radio className={`w-3 h-3 ${cleanToken && autoPoll ? 'text-emerald-400' : 'text-neutral-600'}`} />
-                      <span className={cleanToken && autoPoll ? 'text-emerald-400' : 'text-neutral-500'}>
+                      <Radio className={`w-3 h-3 ${cleanToken && autoPoll ? 'text-emerald-600 dark:text-emerald-400' : 'text-neutral-400 dark:text-neutral-600'}`} />
+                      <span className={cleanToken && autoPoll ? 'text-emerald-600 dark:text-emerald-400' : 'text-neutral-500'}>
                         {cleanToken && autoPoll ? 'Listening' : 'Idle'}
                       </span>
                     </span>
@@ -965,19 +1089,19 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                 <>
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-medium text-neutral-300 text-[11px] flex items-center space-x-1.5">
-                        <Link2 className="w-3.5 h-3.5 text-neutral-400" />
+                      <span className="font-medium text-neutral-700 dark:text-neutral-300 text-[11px] flex items-center space-x-1.5">
+                        <Link2 className="w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400" />
                         <span>HTTPS MCP Server URL</span>
                       </span>
                       <button
                         type="button"
                         onClick={() => handleCopyText('mcpUrl', mcpUrl)}
-                        className="flex items-center space-x-1 text-[10px] text-neutral-300 hover:text-white bg-neutral-900 border border-neutral-800 px-2 py-0.5 rounded transition-colors"
+                        className="flex items-center space-x-1 text-[10px] text-neutral-700 hover:text-neutral-950 bg-neutral-100 border border-neutral-200 dark:text-neutral-300 dark:hover:text-white dark:bg-neutral-900 dark:border-neutral-800 px-2 py-0.5 rounded transition-colors"
                       >
                         {copiedField === 'mcpUrl' ? (
                           <>
-                            <Check className="w-3 h-3 text-emerald-400" />
-                            <span className="text-emerald-400">Copied</span>
+                            <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                            <span className="text-emerald-600 dark:text-emerald-400">Copied</span>
                           </>
                         ) : (
                           <>
@@ -988,7 +1112,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                       </button>
                     </div>
 
-                    <div className="bg-neutral-950 border border-neutral-800 rounded-md px-2.5 py-2 font-mono text-[11px] text-neutral-100 break-all select-all">
+                    <div className="bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md px-2.5 py-2 font-mono text-[11px] text-neutral-900 dark:text-neutral-100 break-all select-all">
                       {mcpUrl}
                     </div>
                   </div>
@@ -996,18 +1120,18 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   {/* Copyable MCP JSON Config */}
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <span className="font-medium text-neutral-300 text-[11px]">
+                      <span className="font-medium text-neutral-700 dark:text-neutral-300 text-[11px]">
                         MCP Client Config (JSON)
                       </span>
                       <button
                         type="button"
                         onClick={() => handleCopyText('mcpConfig', mcpConfigJson)}
-                        className="flex items-center space-x-1 text-[10px] text-neutral-300 hover:text-white bg-neutral-900 border border-neutral-800 px-2 py-0.5 rounded transition-colors"
+                        className="flex items-center space-x-1 text-[10px] text-neutral-700 hover:text-neutral-950 bg-neutral-100 border border-neutral-200 dark:text-neutral-300 dark:hover:text-white dark:bg-neutral-900 dark:border-neutral-800 px-2 py-0.5 rounded transition-colors"
                       >
                         {copiedField === 'mcpConfig' ? (
                           <>
-                            <Check className="w-3 h-3 text-emerald-400" />
-                            <span className="text-emerald-400">Copied</span>
+                            <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                            <span className="text-emerald-600 dark:text-emerald-400">Copied</span>
                           </>
                         ) : (
                           <>
@@ -1018,33 +1142,33 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                       </button>
                     </div>
 
-                    <div className="bg-neutral-950 border border-neutral-800 rounded-md p-2.5 font-mono text-[11px] text-neutral-300 overflow-x-auto">
+                    <div className="bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md p-2.5 font-mono text-[11px] text-neutral-800 dark:text-neutral-300 overflow-x-auto">
                       <pre>{mcpConfigJson}</pre>
                     </div>
                   </div>
 
                   {/* Exposed MCP Tools List */}
-                  <div className="bg-neutral-900 border border-neutral-800 rounded-md p-3 space-y-2">
-                    <div className="text-[11px] font-medium text-neutral-300">Exposed MCP Tools</div>
+                  <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-md p-3 space-y-2">
+                    <div className="text-[11px] font-medium text-neutral-800 dark:text-neutral-300">Exposed MCP Tools</div>
                     <div className="space-y-1.5 text-[11px]">
                       <div className="flex items-start justify-between gap-2">
-                        <span className="font-mono text-neutral-200">push_3d_code</span>
+                        <span className="font-mono text-neutral-900 dark:text-neutral-200">push_3d_code</span>
                         <span className="text-neutral-500 text-right">Render Three.js code live</span>
                       </div>
                       <div className="flex items-start justify-between gap-2">
-                        <span className="font-mono text-neutral-200">get_viewport_screenshot</span>
+                        <span className="font-mono text-neutral-900 dark:text-neutral-200">get_viewport_screenshot</span>
                         <span className="text-neutral-500 text-right">Return PNG render feedback</span>
                       </div>
                       <div className="flex items-start justify-between gap-2">
-                        <span className="font-mono text-neutral-200">get_current_code</span>
+                        <span className="font-mono text-neutral-900 dark:text-neutral-200">get_current_code</span>
                         <span className="text-neutral-500 text-right">Inspect active scene code</span>
                       </div>
                       <div className="flex items-start justify-between gap-2">
-                        <span className="font-mono text-neutral-200">get_threejs_skills</span>
-                        <span className="text-neutral-500 text-right">Query 13 Three.js skill docs</span>
+                        <span className="font-mono text-neutral-900 dark:text-neutral-200">get_threejs_skills</span>
+                        <span className="text-neutral-500 text-right">Query {installedSkills.length || 13} Three.js skill docs</span>
                       </div>
                       <div className="flex items-start justify-between gap-2">
-                        <span className="font-mono text-neutral-200">clear_viewport</span>
+                        <span className="font-mono text-neutral-900 dark:text-neutral-200">clear_viewport</span>
                         <span className="text-neutral-500 text-right">Reset active canvas</span>
                       </div>
                     </div>
@@ -1052,10 +1176,10 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
                   {/* Quick HTTPS JSON-RPC Test Snippet */}
                   <div className="space-y-1.5">
-                    <div className="font-medium text-neutral-300 text-[11px]">
+                    <div className="font-medium text-neutral-700 dark:text-neutral-300 text-[11px]">
                       Test HTTPS MCP Endpoint (cURL)
                     </div>
-                    <div className="bg-neutral-950 border border-neutral-800 rounded-md p-2.5 font-mono text-[11px] text-neutral-300 overflow-x-auto">
+                    <div className="bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md p-2.5 font-mono text-[11px] text-neutral-800 dark:text-neutral-300 overflow-x-auto">
                       <pre>{`curl -X POST "${mcpUrl}" \\
   -H "Content-Type: application/json" \\
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`}</pre>
@@ -1063,9 +1187,9 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                   </div>
                 </>
               ) : (
-                <div className="bg-neutral-900/60 border border-neutral-800 border-dashed rounded-md p-4 text-center space-y-2">
-                  <KeyRound className="w-5 h-5 text-neutral-500 mx-auto" />
-                  <div className="text-neutral-300 font-medium text-xs">No Session Token Set</div>
+                <div className="bg-neutral-50 dark:bg-neutral-900/60 border border-neutral-200 dark:border-neutral-800 border-dashed rounded-md p-4 text-center space-y-2">
+                  <KeyRound className="w-5 h-5 text-neutral-400 dark:text-neutral-500 mx-auto" />
+                  <div className="text-neutral-800 dark:text-neutral-300 font-medium text-xs">No Session Token Set</div>
                   <p className="text-[11px] text-neutral-500 leading-relaxed">
                     Enter your own session token above or click Generate to create your private HTTPS MCP endpoint URL.
                   </p>

@@ -70,10 +70,12 @@ app.get('/api/health', (_req, res) => {
 });
 
 /**
- * List Installed Three.js Skills (CloudAI-X/threejs-skills)
+ * List Installed Three.js Skills
  */
-app.get('/api/skills', (_req, res) => {
-  const allSkills = getAllSkills();
+app.get('/api/skills', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const forceReload = req.query.refresh === '1' || req.query.refresh === 'true';
+  const allSkills = getAllSkills(forceReload);
   const list = Array.from(allSkills.values()).map((s) => ({
     id: s.id,
     name: s.name,

@@ -59,7 +59,7 @@ export const MCP_TOOLS = [
         code: {
           type: 'string',
           description:
-            'Complete executable Three.js TypeScript/JavaScript code module. Must export function createModel(): THREE.Group (or THREE.Object3D) with procedural geometries, materials, and optional animation loop in root.userData.tick(delta, elapsed).',
+            'Complete executable Three.js TypeScript/JavaScript code module. Must export function createModel(): THREE.Group (or THREE.Object3D) with procedural geometries, materials, and optional animations. For multiple selectable animations (e.g. idle, walk, run, sit, bark), attach named handlers to root.userData.animations = { idle: (delta, elapsed) => ..., walk: (delta, elapsed) => ... } (with optional root.userData.defaultAnimation) or attach THREE.AnimationClip[] to root.animations. Single-loop animations can also use root.userData.tick(delta, elapsed).',
         },
         title: {
           type: 'string',

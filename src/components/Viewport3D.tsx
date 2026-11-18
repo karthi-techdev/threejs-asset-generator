@@ -12,19 +12,56 @@ import {
   Camera,
   Box,
   FileCode2,
-  RotateCcw
+  RotateCcw,
+  Film
 } from 'lucide-react';
 
 interface Viewport3DProps {
   code: string;
   sessionId: string;
+  uiTheme?: 'light' | 'dark';
+  activeAnimation?: string | null;
+  onSelectAnimation?: (name: string) => void;
+  onAnimationsDetected?: (names: string[], defaultName: string | null) => void;
   onCodeError?: (error: string | null) => void;
   onExportGlb?: () => void;
 }
 
+export function formatAnimationLabel(raw: string): string {
+  return raw
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const ANIM_SPEEDS = [0.5, 1, 1.5, 2] as const;
+
+type BackdropPresetId = 'light' | 'light-neutral' | 'white' | 'dark' | 'neutral' | 'pitch';
+
+const BACKDROP_PRESETS: Record<
+  BackdropPresetId,
+  { label: string; color: number; gridCenter: number; gridLines: number }
+> = {
+  light: { label: 'Light', color: 0xf4f4f5, gridCenter: 0xa1a1aa, gridLines: 0xd4d4d8 },
+  'light-neutral': { label: 'Neutral', color: 0xe4e4e7, gridCenter: 0x71717a, gridLines: 0xc4c4cc },
+  white: { label: 'White', color: 0xffffff, gridCenter: 0xa1a1aa, gridLines: 0xe4e4e7 },
+  dark: { label: 'Dark', color: 0x09090b, gridCenter: 0x3f3f46, gridLines: 0x202024 },
+  neutral: { label: 'Neutral', color: 0x121215, gridCenter: 0x3f3f46, gridLines: 0x202024 },
+  pitch: { label: 'Black', color: 0x000000, gridCenter: 0x3f3f46, gridLines: 0x202024 },
+};
+
+const LIGHT_BACKDROP_IDS: BackdropPresetId[] = ['light', 'light-neutral', 'white'];
+const DARK_BACKDROP_IDS: BackdropPresetId[] = ['dark', 'neutral', 'pitch'];
+
 export const Viewport3D: React.FC<Viewport3DProps> = ({
   code,
   sessionId,
+  uiTheme = 'dark',
+  activeAnimation: controlledAnimation,
+  onSelectAnimation,
+  onAnimationsDetected,
   onCodeError,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -36,19 +73,86 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   const animFrameRef = useRef<number | null>(null);
   const gridHelperRef = useRef<THREE.GridHelper | null>(null);
 
+  // Animation engine refs (avoid stale closures in requestAnimationFrame loop)
+  const isPlayingRef = useRef<boolean>(true);
+  const animSpeedRef = useRef<number>(1);
+  const animElapsedRef = useRef<number>(0);
+  const activeAnimationRef = useRef<string | null>(null);
+  const namedTickMapRef = useRef<Record<string, (delta: number, elapsed: number) => void>>({});
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null);
+  const mixerActionsRef = useRef<Record<string, THREE.AnimationAction>>({});
+  const restPoseRef = useRef<
+    Map<THREE.Object3D, { pos: THREE.Vector3; rot: THREE.Euler; scale: THREE.Vector3 }>
+  >(new Map());
+
   const [wireframe, setWireframe] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
-  const [theme, setTheme] = useState<'dark' | 'neutral' | 'pitch'>('dark');
+  const [animSpeed, setAnimSpeed] = useState<number>(1);
+  const [animationsList, setAnimationsList] = useState<string[]>([]);
+  const [internalAnimation, setInternalAnimation] = useState<string | null>(null);
+  const [theme, setTheme] = useState<BackdropPresetId>(() =>
+    uiTheme === 'light' ? 'light' : 'dark'
+  );
   const [polyCount, setPolyCount] = useState(0);
   const [fps, setFps] = useState(60);
 
-  // Solid flat background colors (No Gradients)
-  const bgColors: Record<string, number> = {
-    dark: 0x09090b,
-    neutral: 0x121215,
-    pitch: 0x000000,
-  };
+  const activeAnimation = controlledAnimation !== undefined ? controlledAnimation : internalAnimation;
+
+  const restoreRestPose = useCallback(() => {
+    restPoseRef.current.forEach((pose, obj) => {
+      obj.position.copy(pose.pos);
+      obj.rotation.copy(pose.rot);
+      obj.scale.copy(pose.scale);
+    });
+  }, []);
+
+  const handleSelectAnimation = useCallback(
+    (name: string) => {
+      setInternalAnimation(name);
+      onSelectAnimation?.(name);
+      setIsPlaying(true);
+    },
+    [onSelectAnimation]
+  );
+
+  // Keep animation control refs synced with React state
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    animSpeedRef.current = animSpeed;
+  }, [animSpeed]);
+
+  // Apply animation switch cleanly (rest pose + mixer crossfade + userData.setAnimation)
+  useEffect(() => {
+    activeAnimationRef.current = activeAnimation ?? null;
+    animElapsedRef.current = 0;
+
+    if (!activeAnimation || !currentModelRef.current) return;
+
+    const actions = mixerActionsRef.current;
+    if (actions[activeAnimation]) {
+      Object.entries(actions).forEach(([key, action]) => {
+        if (key !== activeAnimation) {
+          action.fadeOut(0.2);
+        }
+      });
+      actions[activeAnimation].reset().fadeIn(0.2).play();
+    } else {
+      restoreRestPose();
+      if (typeof currentModelRef.current.userData?.setAnimation === 'function') {
+        try {
+          currentModelRef.current.userData.setAnimation(activeAnimation);
+        } catch {
+          // ignore custom switcher errors
+        }
+      }
+    }
+  }, [activeAnimation, restoreRestPose]);
+
+  const activeBackdropIds = uiTheme === 'light' ? LIGHT_BACKDROP_IDS : DARK_BACKDROP_IDS;
 
   /**
    * Initializes Three.js Scene, Camera, Renderer, Lights, Controls
@@ -60,8 +164,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const height = container.clientHeight;
 
     // 1. Scene
+    const initialPreset = BACKDROP_PRESETS[theme] ?? BACKDROP_PRESETS.dark;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(bgColors.dark);
+    scene.background = new THREE.Color(initialPreset.color);
     sceneRef.current = scene;
 
     // 2. Camera
@@ -110,9 +215,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     fillLight.position.set(5, 3, -4);
     scene.add(fillLight);
 
-    // 6. Grid Helper (Subtle Dark Neutral)
-    const gridHelper = new THREE.GridHelper(14, 28, 0x3f3f46, 0x202024);
+    // 6. Grid Helper (Flat Neutral matching backdrop)
+    const gridHelper = new THREE.GridHelper(
+      14,
+      28,
+      initialPreset.gridCenter,
+      initialPreset.gridLines
+    );
     gridHelper.position.y = -0.01;
+    gridHelper.visible = showGrid;
     scene.add(gridHelper);
     gridHelperRef.current = gridHelper;
 
@@ -136,12 +247,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         fpsTimer = now;
       }
 
-      // Execute custom model animation tick hook if present
-      if (isPlaying && currentModelRef.current?.userData?.tick) {
+      // Execute active model animation (AnimationMixer clips, named procedural animation, or legacy tick)
+      if (isPlayingRef.current && currentModelRef.current) {
+        const clampedDt = Math.min(Math.max(dt, 0), 0.1);
+        const scaledDt = clampedDt * animSpeedRef.current;
+        animElapsedRef.current += scaledDt;
+
         try {
-          currentModelRef.current.userData.tick(dt, now / 1000);
+          const activeName = activeAnimationRef.current;
+          if (mixerRef.current && activeName && mixerActionsRef.current[activeName]) {
+            mixerRef.current.update(scaledDt);
+          } else if (activeName && namedTickMapRef.current[activeName]) {
+            namedTickMapRef.current[activeName](scaledDt, animElapsedRef.current);
+          } else if (typeof currentModelRef.current.userData?.tick === 'function') {
+            currentModelRef.current.userData.tick(scaledDt, animElapsedRef.current);
+          }
         } catch (e) {
-          // suppress runtime tick errors
+          // suppress runtime animation errors
         }
       }
 
@@ -171,12 +293,36 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   }, []);
 
   /**
-   * Updates Solid Background (No Gradients)
+   * Sync viewport backdrop with global Light/Dark UI theme
+   */
+  useEffect(() => {
+    setTheme(uiTheme === 'light' ? 'light' : 'dark');
+  }, [uiTheme]);
+
+  /**
+   * Updates Solid Background (No Gradients) & Grid Helper palette
    */
   useEffect(() => {
     if (!sceneRef.current) return;
-    const colorHex = bgColors[theme] ?? 0x09090b;
-    sceneRef.current.background = new THREE.Color(colorHex);
+    const scene = sceneRef.current;
+    const preset = BACKDROP_PRESETS[theme] ?? BACKDROP_PRESETS.dark;
+    scene.background = new THREE.Color(preset.color);
+
+    if (gridHelperRef.current) {
+      scene.remove(gridHelperRef.current);
+      gridHelperRef.current.geometry.dispose();
+      if (Array.isArray(gridHelperRef.current.material)) {
+        gridHelperRef.current.material.forEach((m) => m.dispose());
+      } else {
+        gridHelperRef.current.material.dispose();
+      }
+    }
+
+    const nextGrid = new THREE.GridHelper(14, 28, preset.gridCenter, preset.gridLines);
+    nextGrid.position.y = -0.01;
+    nextGrid.visible = showGrid;
+    scene.add(nextGrid);
+    gridHelperRef.current = nextGrid;
   }, [theme]);
 
   /**
@@ -196,7 +342,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     const scene = sceneRef.current;
 
     try {
-      // Clean up previous model
+      // Clean up previous model & animation mixer
+      if (mixerRef.current) {
+        mixerRef.current.stopAllAction();
+        mixerRef.current = null;
+      }
+      mixerActionsRef.current = {};
+      namedTickMapRef.current = {};
+      restPoseRef.current.clear();
+      animElapsedRef.current = 0;
+
       if (currentModelRef.current) {
         scene.remove(currentModelRef.current);
         currentModelRef.current.traverse((child) => {
@@ -214,9 +369,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
       const safeCode = typeof code === 'string' ? code : '';
 
-      // When code is empty (no demo), reset polycount and clear error
+      // When code is empty (no demo), reset polycount, animations and clear error
       if (!safeCode.trim()) {
         setPolyCount(0);
+        setAnimationsList([]);
+        setInternalAnimation(null);
+        activeAnimationRef.current = null;
+        onAnimationsDetected?.([], null);
         onCodeError?.(null);
         return;
       }
@@ -271,9 +430,100 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         }
       });
 
+      // Snapshot rest poses before any animation runs so switching animations stays clean
+      model.traverse((obj) => {
+        restPoseRef.current.set(obj, {
+          pos: obj.position.clone(),
+          rot: obj.rotation.clone(),
+          scale: obj.scale.clone(),
+        });
+      });
+
+      // Discover available animations from the generated model
+      const detectedNames: string[] = [];
+      const detectedSet = new Set<string>();
+      const addDetected = (name: string) => {
+        const clean = name.trim();
+        if (clean && !detectedSet.has(clean)) {
+          detectedSet.add(clean);
+          detectedNames.push(clean);
+        }
+      };
+
+      // Pattern A: Named procedural animation functions in userData.animations = { idle: fn, walk: fn, ... }
+      const rawUserAnims = model.userData?.animations;
+      if (rawUserAnims && typeof rawUserAnims === 'object' && !Array.isArray(rawUserAnims)) {
+        for (const [animName, fn] of Object.entries(rawUserAnims)) {
+          if (typeof fn === 'function') {
+            namedTickMapRef.current[animName] = fn as (delta: number, elapsed: number) => void;
+            addDetected(animName);
+          }
+        }
+      }
+
+      // Pattern B: Three.js AnimationClip[] on model.animations, userData.clips, or array userData.animations
+      const clipSources: unknown[] = [
+        ...(Array.isArray(model.animations) ? model.animations : []),
+        ...(Array.isArray(model.userData?.clips) ? model.userData.clips : []),
+        ...(Array.isArray(rawUserAnims) ? rawUserAnims : []),
+      ];
+      const validClips = clipSources.filter(
+        (c): c is THREE.AnimationClip => c instanceof THREE.AnimationClip
+      );
+      if (validClips.length > 0) {
+        const mixer = new THREE.AnimationMixer(model);
+        mixerRef.current = mixer;
+        validClips.forEach((clip, idx) => {
+          const clipName = clip.name?.trim() || `Animation ${idx + 1}`;
+          mixerActionsRef.current[clipName] = mixer.clipAction(clip);
+          addDetected(clipName);
+        });
+      }
+
+      // Pattern C: Custom animationNames + setAnimation(name) + tick
+      if (Array.isArray(model.userData?.animationNames)) {
+        for (const item of model.userData.animationNames) {
+          if (typeof item === 'string') addDetected(item);
+        }
+      }
+
+      // Pattern D: Fallback single anonymous tick
+      if (detectedNames.length === 0 && typeof model.userData?.tick === 'function') {
+        addDetected('Default');
+      }
+
+      // Pick initial active animation
+      const requestedDefault =
+        typeof model.userData?.defaultAnimation === 'string'
+          ? model.userData.defaultAnimation
+          : null;
+      const idleMatch = detectedNames.find((n) => n.toLowerCase() === 'idle');
+      const initialAnim =
+        requestedDefault && detectedSet.has(requestedDefault)
+          ? requestedDefault
+          : idleMatch || detectedNames[0] || null;
+
       setPolyCount(Math.round(totalTris));
       scene.add(model);
       currentModelRef.current = model;
+
+      setAnimationsList(detectedNames);
+      setInternalAnimation(initialAnim);
+      activeAnimationRef.current = initialAnim;
+      onAnimationsDetected?.(detectedNames, initialAnim);
+
+      // Start initial AnimationClip action or setAnimation hook immediately
+      if (initialAnim) {
+        if (mixerActionsRef.current[initialAnim]) {
+          mixerActionsRef.current[initialAnim].reset().play();
+        } else if (typeof model.userData?.setAnimation === 'function') {
+          try {
+            model.userData.setAnimation(initialAnim);
+          } catch {
+            // ignore
+          }
+        }
+      }
 
       onCodeError?.(null);
 
@@ -472,7 +722,12 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       (error) => {
         console.error('GLTF Export error:', error);
       },
-      { binary: true }
+      {
+        binary: true,
+        animations: currentModelRef.current.animations?.length
+          ? currentModelRef.current.animations
+          : undefined,
+      }
     );
   };
 
@@ -491,18 +746,18 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   };
 
   return (
-    <div className="relative w-full h-full flex flex-col bg-neutral-950 overflow-hidden select-none">
+    <div className="relative w-full h-full flex flex-col bg-neutral-100 dark:bg-neutral-950 overflow-hidden select-none transition-colors">
       {/* 3D Canvas Container */}
       <div ref={containerRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
       {/* Empty State Overlay when no model is loaded (no demo) */}
       {!(typeof code === 'string' && code.trim()) && (
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-neutral-500 space-y-3 z-0">
-          <div className="w-12 h-12 rounded-lg border border-neutral-800 bg-neutral-900/60 flex items-center justify-center text-neutral-400">
+          <div className="w-12 h-12 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white/90 dark:bg-neutral-900/60 flex items-center justify-center text-neutral-600 dark:text-neutral-400">
             <Box className="w-6 h-6 stroke-[1.5]" />
           </div>
           <div className="text-center space-y-1">
-            <div className="text-sm font-medium text-neutral-300">Ready to Sculpt</div>
+            <div className="text-sm font-medium text-neutral-800 dark:text-neutral-300">Ready to Sculpt</div>
             <div className="text-xs text-neutral-500 max-w-xs leading-relaxed">
               Connect an AI agent to generate procedural Three.js models, or paste code into the editor.
             </div>
@@ -511,11 +766,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       )}
 
       {/* Top Floating Viewport Toolbar - Minimal, Flat */}
-      <div className="absolute top-3 left-3 flex items-center space-x-1.5 bg-neutral-900/95 px-2.5 py-1.5 rounded-md border border-neutral-800 z-10 text-xs">
+      <div className="absolute top-3 left-3 flex items-center space-x-1.5 bg-white/95 dark:bg-neutral-900/95 px-2.5 py-1.5 rounded-md border border-neutral-200 dark:border-neutral-800 z-10 text-xs transition-colors">
         <button
           onClick={() => setShowGrid(!showGrid)}
           title="Toggle Grid"
-          className={`p-1.5 rounded transition-colors ${showGrid ? 'text-white bg-neutral-800' : 'text-neutral-400 hover:text-white'}`}
+          className={`p-1.5 rounded transition-colors ${
+            showGrid
+              ? 'text-neutral-950 bg-neutral-200 dark:text-white dark:bg-neutral-800'
+              : 'text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white'
+          }`}
         >
           <Grid className="w-3.5 h-3.5" />
         </button>
@@ -523,7 +782,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         <button
           onClick={() => setWireframe(!wireframe)}
           title="Toggle Wireframe"
-          className={`p-1.5 rounded transition-colors ${wireframe ? 'text-white bg-neutral-800' : 'text-neutral-400 hover:text-white'}`}
+          className={`p-1.5 rounded transition-colors ${
+            wireframe
+              ? 'text-neutral-950 bg-neutral-200 dark:text-white dark:bg-neutral-800'
+              : 'text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white'
+          }`}
         >
           <Layers className="w-3.5 h-3.5" />
         </button>
@@ -531,55 +794,52 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         <button
           onClick={() => setIsPlaying(!isPlaying)}
           title={isPlaying ? 'Pause Animation' : 'Play Animation'}
-          className={`p-1.5 rounded transition-colors ${isPlaying ? 'text-neutral-200' : 'text-neutral-500 hover:text-neutral-300'}`}
+          className={`p-1.5 rounded transition-colors ${
+            isPlaying
+              ? 'text-neutral-900 dark:text-neutral-200'
+              : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-300'
+          }`}
         >
           {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
         </button>
 
-        <div className="h-3.5 w-px bg-neutral-800 mx-1" />
+        <div className="h-3.5 w-px bg-neutral-200 dark:bg-neutral-800 mx-1" />
 
-        {/* Backdrop Presets (Solid Flat Colors) */}
-        <button
-          onClick={() => setTheme('dark')}
-          className={`px-2 py-0.5 rounded text-[11px] transition-colors ${theme === 'dark' ? 'text-white bg-neutral-800 font-medium' : 'text-neutral-400 hover:text-white'}`}
-        >
-          Dark
-        </button>
+        {/* Backdrop Presets (Solid Flat Colors matched to Light / Dark UI Mode) */}
+        {activeBackdropIds.map((presetId) => (
+          <button
+            key={presetId}
+            onClick={() => setTheme(presetId)}
+            className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+              theme === presetId
+                ? 'text-neutral-950 bg-neutral-200 dark:text-white dark:bg-neutral-800 font-medium'
+                : 'text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white'
+            }`}
+          >
+            {BACKDROP_PRESETS[presetId].label}
+          </button>
+        ))}
 
-        <button
-          onClick={() => setTheme('neutral')}
-          className={`px-2 py-0.5 rounded text-[11px] transition-colors ${theme === 'neutral' ? 'text-white bg-neutral-800 font-medium' : 'text-neutral-400 hover:text-white'}`}
-        >
-          Neutral
-        </button>
-
-        <button
-          onClick={() => setTheme('pitch')}
-          className={`px-2 py-0.5 rounded text-[11px] transition-colors ${theme === 'pitch' ? 'text-white bg-neutral-800 font-medium' : 'text-neutral-400 hover:text-white'}`}
-        >
-          Black
-        </button>
-
-        <div className="h-3.5 w-px bg-neutral-800 mx-1" />
+        <div className="h-3.5 w-px bg-neutral-200 dark:bg-neutral-800 mx-1" />
 
         {/* Camera Angles */}
         <button
           onClick={() => handleResetCamera('perspective')}
-          className="px-2 py-0.5 rounded text-[11px] text-neutral-400 hover:text-white transition-colors"
+          className="px-2 py-0.5 rounded text-[11px] text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors"
         >
           3D
         </button>
 
         <button
           onClick={() => handleResetCamera('front')}
-          className="px-2 py-0.5 rounded text-[11px] text-neutral-400 hover:text-white transition-colors"
+          className="px-2 py-0.5 rounded text-[11px] text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors"
         >
           Front
         </button>
 
         <button
           onClick={() => handleResetCamera('top')}
-          className="px-2 py-0.5 rounded text-[11px] text-neutral-400 hover:text-white transition-colors"
+          className="px-2 py-0.5 rounded text-[11px] text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors"
         >
           Top
         </button>
@@ -590,7 +850,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         <button
           onClick={handleExportGLB}
           disabled={!currentModelRef.current}
-          className="flex items-center space-x-1.5 bg-white hover:bg-neutral-200 disabled:bg-neutral-800 disabled:text-neutral-500 disabled:cursor-not-allowed text-neutral-950 px-2.5 py-1.5 rounded-md font-medium transition-colors"
+          className="flex items-center space-x-1.5 bg-neutral-950 hover:bg-neutral-800 disabled:bg-neutral-200 disabled:text-neutral-400 dark:bg-white dark:hover:bg-neutral-200 dark:disabled:bg-neutral-800 dark:disabled:text-neutral-500 disabled:cursor-not-allowed text-white dark:text-neutral-950 px-2.5 py-1.5 rounded-md font-medium transition-colors"
           title="Export 3D Model to .GLB binary"
         >
           <Download className="w-3.5 h-3.5" />
@@ -600,7 +860,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         <button
           onClick={handleDownloadCode}
           disabled={!(typeof code === 'string' && code.trim())}
-          className="flex items-center space-x-1.5 bg-neutral-900 hover:bg-neutral-800 disabled:bg-neutral-900/50 disabled:text-neutral-600 disabled:cursor-not-allowed text-neutral-200 border border-neutral-800 px-2.5 py-1.5 rounded-md font-medium transition-colors"
+          className="flex items-center space-x-1.5 bg-white hover:bg-neutral-100 disabled:bg-neutral-100 disabled:text-neutral-400 text-neutral-800 border border-neutral-200 dark:bg-neutral-900 dark:hover:bg-neutral-800 dark:disabled:bg-neutral-900/50 dark:disabled:text-neutral-600 disabled:cursor-not-allowed dark:text-neutral-200 dark:border-neutral-800 px-2.5 py-1.5 rounded-md font-medium transition-colors"
           title="Download TypeScript code file"
         >
           <FileCode2 className="w-3.5 h-3.5" />
@@ -609,16 +869,69 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       </div>
 
       {/* Bottom Floating Stats Bar */}
-      <div className="absolute bottom-3 left-3 flex items-center space-x-2.5 bg-neutral-900/90 px-2.5 py-1 rounded-md border border-neutral-800 text-[11px] text-neutral-400 z-10 font-mono">
+      <div className="absolute bottom-3 left-3 flex items-center space-x-2.5 bg-white/95 dark:bg-neutral-900/90 px-2.5 py-1 rounded-md border border-neutral-200 dark:border-neutral-800 text-[11px] text-neutral-600 dark:text-neutral-400 z-10 font-mono transition-colors">
         <div className="flex items-center space-x-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400" />
           <span>{fps} FPS</span>
         </div>
-        <span className="text-neutral-600">/</span>
+        <span className="text-neutral-300 dark:text-neutral-600">/</span>
         <span>{polyCount.toLocaleString()} Polys</span>
-        <span className="text-neutral-600">/</span>
+        <span className="text-neutral-300 dark:text-neutral-600">/</span>
         <span>Session: {sessionId || 'unset'}</span>
       </div>
+
+      {/* Bottom Right Floating Animations Selector Bar (Solid Flat Light / Dark) */}
+      {animationsList.length > 0 && (
+        <div className="absolute bottom-3 right-3 max-w-[58%] flex flex-wrap items-center justify-end gap-1.5 bg-white/95 dark:bg-neutral-900/95 px-2.5 py-1.5 rounded-md border border-neutral-200 dark:border-neutral-800 text-[11px] z-10 transition-colors">
+          <div className="flex items-center space-x-1 text-neutral-500 dark:text-neutral-400 pr-1">
+            <Film className="w-3 h-3" />
+            <span className="font-medium text-[10px]">Animations</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1">
+            {animationsList.map((animName) => {
+              const isSelected = activeAnimation === animName;
+              return (
+                <button
+                  key={animName}
+                  type="button"
+                  onClick={() => handleSelectAnimation(animName)}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+                    isSelected
+                      ? 'bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 font-medium'
+                      : 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-300'
+                  }`}
+                >
+                  {formatAnimationLabel(animName)}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="h-3.5 w-px bg-neutral-200 dark:bg-neutral-800 mx-0.5" />
+
+          <button
+            type="button"
+            onClick={() => setIsPlaying(!isPlaying)}
+            title={isPlaying ? 'Pause Animation' : 'Play Animation'}
+            className="p-1 rounded bg-neutral-100 hover:bg-neutral-200 text-neutral-800 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-200 transition-colors"
+          >
+            {isPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const idx = ANIM_SPEEDS.indexOf(animSpeed as (typeof ANIM_SPEEDS)[number]);
+              setAnimSpeed(ANIM_SPEEDS[(idx + 1) % ANIM_SPEEDS.length]);
+            }}
+            title="Cycle Animation Speed"
+            className="px-1.5 py-0.5 rounded font-mono text-[10px] bg-neutral-100 hover:bg-neutral-200 text-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-300 transition-colors"
+          >
+            {animSpeed}x
+          </button>
+        </div>
+      )}
     </div>
   );
 };

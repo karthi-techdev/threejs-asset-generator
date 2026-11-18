@@ -31,30 +31,67 @@ function resolveSkillsDir(): string {
 const SKILLS_DIR = resolveSkillsDir();
 
 let cachedSkills: Map<string, ThreeJsSkill> | null = null;
+let cachedDirMtimeMs = 0;
+
+/**
+ * Parses single-line or multi-line YAML frontmatter description (including `>` / `|` block scalars).
+ */
+function parseFrontmatterDescription(yaml: string): string {
+  const blockMatch = yaml.match(/^description:\s*[>|][+-]?\s*\n((?:[ \t]+.*\n?)+)/m);
+  if (blockMatch) {
+    return blockMatch[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+
+  const singleMatch = yaml.match(/^description:\s*(?:"([^"]+)"|'([^']+)'|([^\n]+))/m);
+  if (singleMatch) {
+    return (singleMatch[1] || singleMatch[2] || singleMatch[3] || '').trim();
+  }
+
+  return '';
+}
 
 /**
  * Loads and indexes all Three.js skills from the local skills/ directory.
+ * Automatically reloads if the skills directory has been modified on disk.
  */
-export function getAllSkills(): Map<string, ThreeJsSkill> {
-  if (cachedSkills) return cachedSkills;
-
-  cachedSkills = new Map();
-
+export function getAllSkills(forceReload: boolean = false): Map<string, ThreeJsSkill> {
   if (!fs.existsSync(SKILLS_DIR)) {
     console.warn(`[skills] Warning: Skills directory not found at ${SKILLS_DIR}`);
+    cachedSkills = new Map();
     return cachedSkills;
   }
 
-  const dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
+  let currentMtimeMs = 0;
+  try {
+    currentMtimeMs = fs.statSync(SKILLS_DIR).mtimeMs;
+  } catch {
+    // ignore stat errors
+  }
+
+  if (!forceReload && cachedSkills && currentMtimeMs === cachedDirMtimeMs) {
+    return cachedSkills;
+  }
+
+  cachedSkills = new Map();
+  cachedDirMtimeMs = currentMtimeMs;
+
+  const dirs = fs
+    .readdirSync(SKILLS_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   for (const dir of dirs) {
-    if (!dir.isDirectory()) continue;
     const skillPath = path.join(SKILLS_DIR, dir.name, 'SKILL.md');
     if (!fs.existsSync(skillPath)) continue;
 
     try {
       const content = fs.readFileSync(skillPath, 'utf-8');
-      const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      const frontmatterMatch = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/);
 
       let name = dir.name;
       let description = '';
@@ -64,22 +101,41 @@ export function getAllSkills(): Map<string, ThreeJsSkill> {
         const yaml = frontmatterMatch[1];
         body = frontmatterMatch[2];
 
-        const nameMatch = yaml.match(/name:\s*(.+)/);
-        if (nameMatch) name = nameMatch[1].trim();
+        const nameMatch = yaml.match(/^name:\s*(?:"([^"]+)"|'([^']+)'|([^\n]+))/m);
+        if (nameMatch) name = (nameMatch[1] || nameMatch[2] || nameMatch[3] || dir.name).trim();
 
-        const descMatch = yaml.match(/description:\s*(?:"([^"]+)"|'([^']+)'|([^\n]+))/);
-        if (descMatch) description = (descMatch[1] || descMatch[2] || descMatch[3] || '').trim();
+        description = parseFrontmatterDescription(yaml);
+      }
+
+      if (!description) {
+        const fallbackLine = body
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .find((l) => l.length > 20 && !l.startsWith('#') && !l.startsWith('```') && !l.startsWith('---'));
+        if (fallbackLine) description = fallbackLine.slice(0, 180);
       }
 
       // Determine category
       let category = 'Core';
-      if (dir.name.includes('geometry')) category = 'Geometry';
-      else if (dir.name.includes('material')) category = 'Materials';
-      else if (dir.name.includes('shader')) category = 'Shaders';
-      else if (dir.name.includes('texture')) category = 'Textures';
-      else if (dir.name.includes('light')) category = 'Lighting';
-      else if (dir.name.includes('anim')) category = 'Animation';
-      else if (dir.name.includes('perf')) category = 'Performance';
+      const idLower = dir.name.toLowerCase();
+      if (idLower.includes('procedural') || idLower.includes('sculptor') || idLower.includes('img2threejs') || idLower.includes('vegetation') || idLower.includes('creature') || idLower.includes('building') || idLower.includes('planet')) category = 'Procedural';
+      else if (idLower.includes('r3f') || idLower.includes('react-three-fiber') || idLower.includes('drei')) category = 'React Three Fiber';
+      else if (idLower.includes('webgpu') || idLower.includes('tsl')) category = 'WebGPU';
+      else if (idLower.includes('shader') || idLower.includes('glsl')) category = 'Shaders';
+      else if (idLower.includes('geometry') || idLower.includes('geometries')) category = 'Geometry';
+      else if (idLower.includes('material')) category = 'Materials';
+      else if (idLower.includes('texture')) category = 'Textures';
+      else if (idLower.includes('light') || idLower.includes('shadow') || idLower.includes('sky') || idLower.includes('skies') || idLower.includes('cloud') || idLower.includes('ocean') || idLower.includes('water') || idLower.includes('weather')) category = 'Lighting & Environment';
+      else if (idLower.includes('anim') || idLower.includes('motion')) category = 'Animation';
+      else if (idLower.includes('particle')) category = 'Particles & VFX';
+      else if (idLower.includes('postproc') || idLower.includes('post-proc') || idLower.includes('bloom') || idLower.includes('exposure') || idLower.includes('image-pipeline')) category = 'Post-Processing';
+      else if (idLower.includes('physics')) category = 'Physics';
+      else if (idLower.includes('game')) category = 'Games';
+      else if (idLower.includes('xr') || idLower.includes('spatial') || idLower.includes('ifc') || idLower.includes('sparkjs') || idLower.includes('audio')) category = 'XR & Spatial';
+      else if (idLower.includes('debug') || idLower.includes('error') || idLower.includes('test') || idLower.includes('qa') || idLower.includes('valid')) category = 'Debugging & QA';
+      else if (idLower.includes('perf') || idLower.includes('best-practices')) category = 'Performance';
+      else if (idLower.includes('load') || idLower.includes('asset') || idLower.includes('optimizer')) category = 'Assets & Loaders';
+      else if (idLower.includes('interact') || idLower.includes('control') || idLower.includes('camera') || idLower.includes('raycast')) category = 'Interaction & Camera';
 
       // Extract key instructions and code patterns
       const keyDirectives = extractKeyDirectives(dir.name, body);
@@ -130,35 +186,65 @@ function extractKeyDirectives(skillId: string, body: string): string {
 }
 
 /**
- * Selects the most relevant skills based on user prompt and procedural modeling requirements.
+ * Selects the most relevant skills based on user prompt/topic and procedural modeling requirements.
+ * Scores all installed skills by id, name, category, and description while keeping top matches compact.
  */
-export function getRelevantSkills(userPrompt: string): { skills: ThreeJsSkill[]; names: string[] } {
+export function getRelevantSkills(userPrompt: string, maxSkills: number = 8): { skills: ThreeJsSkill[]; names: string[] } {
   const all = getAllSkills();
+  const query = userPrompt.trim().toLowerCase();
+
+  // Exact ID match first (useful when MCP callers query a specific skill id)
+  const exact = all.get(query);
+  if (exact) {
+    return { skills: [exact], names: [exact.id] };
+  }
+
+  const terms = query
+    .split(/[^a-z0-9-]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+
+  // Score every installed skill against query terms
+  const scored: { skill: ThreeJsSkill; score: number }[] = [];
+  for (const skill of all.values()) {
+    let score = 0;
+    const idL = skill.id.toLowerCase();
+    const nameL = skill.name.toLowerCase();
+    const catL = skill.category.toLowerCase();
+    const descL = skill.description.toLowerCase();
+
+    if (query && idL.includes(query)) score += 20;
+    if (query && nameL.includes(query)) score += 15;
+
+    for (const term of terms) {
+      if (idL.includes(term)) score += 8;
+      if (nameL.includes(term)) score += 6;
+      if (catL.includes(term)) score += 4;
+      if (descL.includes(term)) score += 3;
+    }
+
+    if (score > 0) {
+      scored.push({ skill, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.skill.id.localeCompare(b.skill.id));
+
   const selected = new Map<string, ThreeJsSkill>();
 
-  // Baseline skills always essential for procedural 3D sculpture
+  // Add top query-matched skills first
+  for (const item of scored.slice(0, maxSkills)) {
+    selected.set(item.skill.id, item.skill);
+  }
+
+  // Ensure core procedural baseline skills are present when space allows or when prompt is general
   const baseline = ['threejs-geometry', 'threejs-materials', 'threejs-textures', 'threejs-animation', 'threejs-performance'];
   for (const id of baseline) {
+    if (selected.size >= maxSkills) break;
     const skill = all.get(id);
-    if (skill) selected.set(id, skill);
-  }
-
-  const p = userPrompt.toLowerCase();
-
-  // Dynamic skill matching
-  if (p.includes('shader') || p.includes('glsl') || p.includes('glow') || p.includes('cel') || p.includes('toon') || p.includes('anime') || p.includes('hologram') || p.includes('water')) {
-    const shaderSkill = all.get('threejs-shaders');
-    if (shaderSkill) selected.set('threejs-shaders', shaderSkill);
-  }
-
-  if (p.includes('light') || p.includes('shadow') || p.includes('sun') || p.includes('spot') || p.includes('lamp') || p.includes('neon')) {
-    const lightSkill = all.get('threejs-lighting');
-    if (lightSkill) selected.set('threejs-lighting', lightSkill);
-  }
-
-  if (p.includes('particle') || p.includes('point') || p.includes('cloud') || p.includes('stars')) {
-    const geomSkill = all.get('threejs-geometry');
-    if (geomSkill) selected.set('threejs-geometry', geomSkill);
+    if (skill && !selected.has(id)) {
+      selected.set(id, skill);
+    }
   }
 
   const result = Array.from(selected.values());
@@ -180,7 +266,7 @@ export function buildEnrichedSystemPrompt(userPrompt: string): { prompt: string;
 
   const fullPrompt = `
 You are an expert Three.js procedural 3D artist and software engineer.
-You are powered by the official CloudAI-X/threejs-skills knowledge library.
+You are powered by a curated Three.js skills knowledge library.
 You MUST follow the verified patterns, API conventions, and best practices from these skills to generate the 3D model.
 
 ### APPLIED SKILLS MODULES:
@@ -191,7 +277,7 @@ ${skillsKnowledge}
 
 ### CORE SCULPTING RULES:
 1. CODE ONLY: Reconstruct the object purely from procedural Three.js primitives, custom BufferGeometries, procedural CanvasTextures, and shader materials. NO external .gltf/.glb files, external image URLs, or downloaded art packs.
-2. RUNTIME EXPORT FUNCTION:
+2. RUNTIME EXPORT FUNCTION & NAMED ANIMATIONS:
    Output a single exported function:
    \`\`\`typescript
    import * as THREE from 'three';
@@ -203,11 +289,23 @@ ${skillsKnowledge}
      // 1. Procedural Geometries (curves, tubes, primitives, buffer attributes)
      // 2. Procedural Materials (Standard, Physical, Toon, or ShaderMaterial)
      // 3. Procedural CanvasTextures for high-res surface detail
-     // 4. Object Hierarchy with castShadow and receiveShadow
-     
-     // 5. Looping Animation Loop
+     // 4. Articulated Object Hierarchy (pivots at joints/hips/neck/tail) with castShadow and receiveShadow
+
+     // 5. Named Selectable Animations (displayed automatically in the Studio Viewport UI)
+     // Whenever the user requests animations (e.g. idle, walk, run, sit, bark, jump, wagTail),
+     // implement EVERY requested animation as a named function in root.userData.animations.
+     // Always set transforms explicitly from rest pose values so switching animations never leaves stuck limbs.
+     root.userData.animations = {
+       idle: (delta: number, elapsed: number) => {
+         // subtle breathing, ear twitch, or gentle sway
+       },
+       // Add every animation requested by the user (e.g. walk, run, sit, jump, bark, etc.)
+     };
+     root.userData.defaultAnimation = 'idle';
+
+     // Optional fallback tick (defaults to idle)
      root.userData.tick = (delta: number, elapsed: number) => {
-       // subtle idle breathing, rotation, wind sway, or mechanical movement
+       root.userData.animations.idle(delta, elapsed);
      };
 
      return root;
@@ -217,12 +315,15 @@ ${skillsKnowledge}
    - Identify identity-defining details: bevels, chamfers, panel seams, fasteners, surface wear, gloss vs matte zones.
    - PBR Materials: Use MeshStandardMaterial or MeshPhysicalMaterial with roughness, metalness, clearcoat, or procedural CanvasTextures.
    - Stylized/Anime Models: Use custom shaders, spherical normals, or vertex colors with high-contrast cel-shaded bands.
-4. SHADOWS & LIGHTING:
+4. ANIMATION RIGGING:
+   - Build articulated sub-groups (e.g. headPivot, jawPivot, tailPivot, frontLeftLeg, backRightLeg, etc.) placed at true anatomical/mechanical joint origins so rotations look natural.
+   - If the user asks for multiple animations (e.g., "dog with idle, walk, run, sit, and bark animations"), define ALL of them in \`root.userData.animations\` using clear camelCase/snake_case keys.
+5. SHADOWS & LIGHTING:
    - Mark meshes with \`mesh.castShadow = true\` and \`mesh.receiveShadow = true\`.
-5. PROCEDURAL TEXTURES (CanvasTexture):
-   - When textures are needed (wood grain, bark, leaves, metal panels, computer screens, cloth), generate them procedurally using an in-memory HTML5 Canvas and \`new THREE.CanvasTexture(canvas)\`.
-6. RETURN FORMAT:
-   - Return ONLY clean, executable TypeScript/JavaScript code inside a \`\`\`typescript code block, followed by a brief bulleted breakdown of which Three.js skills you applied.
+6. PROCEDURAL TEXTURES (CanvasTexture):
+   - When textures are needed (wood grain, bark, leaves, fur patterns, metal panels, screens, cloth), generate them procedurally using an in-memory HTML5 Canvas and \`new THREE.CanvasTexture(canvas)\`.
+7. RETURN FORMAT:
+   - Return ONLY clean, executable TypeScript/JavaScript code inside a \`\`\`typescript code block, followed by a brief bulleted breakdown of the animations and Three.js skills you applied.
 `;
 
   return { prompt: fullPrompt, appliedSkills: names };
