@@ -362,7 +362,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
     }
   };
 
-  const readAndOptimizeImage = (file: File): Promise<string> => {
+  const readAndOptimizeImage = (file: File, multiBatch: boolean = false): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
@@ -373,11 +373,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           return;
         }
 
-        // Downscale oversized images so multi-image uploads stay cleanly within serverless body limits
+        // Downscale oversized images so multi-image uploads stay fast and within Vercel serverless limits
         const img = new Image();
         img.onload = () => {
-          const maxDim = 1280;
-          const needsResize = img.width > maxDim || img.height > maxDim || rawDataUrl.length > 650_000;
+          const maxDim = multiBatch ? 896 : 1280;
+          const maxBytes = multiBatch ? 260_000 : 650_000;
+          const needsResize = img.width > maxDim || img.height > maxDim || rawDataUrl.length > maxBytes;
           if (!needsResize) {
             resolve(rawDataUrl);
             return;
@@ -393,7 +394,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
           }
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
           const outputMime = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
-          const optimized = canvas.toDataURL(outputMime, 0.85);
+          const optimized = canvas.toDataURL(outputMime, multiBatch ? 0.8 : 0.85);
           resolve(optimized.length < rawDataUrl.length ? optimized : rawDataUrl);
         };
         img.onerror = () => resolve(rawDataUrl);
@@ -414,12 +415,13 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
     }
 
     const toProcess = files.slice(0, remainingSlots);
+    const isMulti = referenceImages.length + toProcess.length > 2;
     try {
       const loaded = await Promise.all(
         toProcess.map(async (file) => ({
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           name: file.name,
-          dataUrl: await readAndOptimizeImage(file),
+          dataUrl: await readAndOptimizeImage(file, isMulti),
         }))
       );
       setReferenceImages((prev) => [...prev, ...loaded].slice(0, MAX_REFERENCE_IMAGES));
@@ -494,12 +496,33 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
       clearTimeout(stageTimer2);
       clearTimeout(stageTimer3);
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Generation failed.');
+      const rawText = await res.text();
+      let data: any = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        data = null;
       }
 
-      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 504) {
+          throw new Error(
+            'Request timed out on Vercel (504 — 60s serverless limit). Try a faster model, fewer reference images (2–4), or generate via the MCP Server tab.'
+          );
+        }
+        if (res.status === 413) {
+          throw new Error(
+            'Uploaded images exceeded Vercel payload limit (413). Try uploading fewer or smaller reference images.'
+          );
+        }
+        throw new Error(
+          data?.error || `Server error (${res.status}): ${rawText.slice(0, 180) || 'Generation failed.'}`
+        );
+      }
+
+      if (!data) {
+        throw new Error('Server returned an empty or non-JSON response.');
+      }
       setUsedSkills(data.appliedSkills || []);
       setCurrentStage(null);
 
