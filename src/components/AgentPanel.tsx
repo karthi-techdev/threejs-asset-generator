@@ -25,7 +25,8 @@ import {
   Link2,
   Radio,
   X,
-  Film
+  Film,
+  Plus
 } from 'lucide-react';
 import { formatAnimationLabel } from './Viewport3D';
 
@@ -56,6 +57,14 @@ interface InstalledSkill {
   description: string;
   category: string;
 }
+
+interface UploadedReferenceImage {
+  id: string;
+  name: string;
+  dataUrl: string;
+}
+
+const MAX_REFERENCE_IMAGES = 6;
 
 const PROVIDER_METADATA: Record<ProviderType, { label: string; urlPlaceholder: string; keyPlaceholder: string; defaultEndpoint: string }> = {
   gemini: {
@@ -134,7 +143,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
 
   // Generator Execution State - no prefilled text
   const [prompt, setPrompt] = useState('');
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [referenceImages, setReferenceImages] = useState<UploadedReferenceImage[]>([]);
+  const [isDraggingImages, setIsDraggingImages] = useState(false);
   const [sendImageToModel, setSendImageToModel] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [agentAnalysis, setAgentAnalysis] = useState<string | null>(null);
@@ -352,26 +362,108 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
     }
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      setImagePreview(event.target?.result as string);
-    };
-    reader.readAsDataURL(file);
+  const readAndOptimizeImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+      reader.onload = (event) => {
+        const rawDataUrl = event.target?.result as string;
+        if (!rawDataUrl) {
+          reject(new Error(`Empty file: ${file.name}`));
+          return;
+        }
+
+        // Downscale oversized images so multi-image uploads stay cleanly within serverless body limits
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 1280;
+          const needsResize = img.width > maxDim || img.height > maxDim || rawDataUrl.length > 650_000;
+          if (!needsResize) {
+            resolve(rawDataUrl);
+            return;
+          }
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const outputMime = file.type === 'image/png' ? 'image/webp' : 'image/jpeg';
+          const optimized = canvas.toDataURL(outputMime, 0.85);
+          resolve(optimized.length < rawDataUrl.length ? optimized : rawDataUrl);
+        };
+        img.onerror = () => resolve(rawDataUrl);
+        img.src = rawDataUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const addImageFiles = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
+    if (files.length === 0) return;
+
+    const remainingSlots = Math.max(0, MAX_REFERENCE_IMAGES - referenceImages.length);
+    if (remainingSlots === 0) {
+      setErrorMessage(`Maximum ${MAX_REFERENCE_IMAGES} reference images allowed.`);
+      return;
+    }
+
+    const toProcess = files.slice(0, remainingSlots);
+    try {
+      const loaded = await Promise.all(
+        toProcess.map(async (file) => ({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          dataUrl: await readAndOptimizeImage(file),
+        }))
+      );
+      setReferenceImages((prev) => [...prev, ...loaded].slice(0, MAX_REFERENCE_IMAGES));
+      if (files.length > remainingSlots) {
+        setErrorMessage(`Added ${loaded.length} image(s). Maximum ${MAX_REFERENCE_IMAGES} images allowed.`);
+      } else {
+        setErrorMessage(null);
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Failed to read selected image(s).');
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      await addImageFiles(e.target.files);
+    }
+    // Reset input value so the same file can be re-selected if removed
+    e.target.value = '';
+  };
+
+  const handleImageDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingImages(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      await addImageFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handleRemoveImage = (id: string) => {
+    setReferenceImages((prev) => prev.filter((img) => img.id !== id));
   };
 
   const handleGenerate = async () => {
-    if (!prompt.trim() && !imagePreview) {
-      setErrorMessage('Please provide a prompt or reference image.');
+    if (!prompt.trim() && referenceImages.length === 0) {
+      setErrorMessage('Please provide a prompt or at least one reference image.');
       return;
     }
 
     setIsLoading(true);
     setErrorMessage(null);
     setAgentAnalysis(null);
-    setCurrentStage('Injecting CloudAI-X Three.js skills...');
+    setCurrentStage('Selecting matching Three.js skills...');
 
     try {
       const stageTimer1 = setTimeout(() => setCurrentStage('Applying threejs-geometry & buffer math...'), 1800);
@@ -379,12 +471,17 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
       const stageTimer3 = setTimeout(() => setCurrentStage('Wiring threejs-animation loop and quality gates...'), 6000);
 
       const activeUrl = baseUrl.trim() || PROVIDER_METADATA[provider].defaultEndpoint;
+      const imagePayload =
+        sendImageToModel && referenceImages.length > 0
+          ? referenceImages.map((img) => img.dataUrl)
+          : undefined;
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: prompt.trim(),
-          image: (sendImageToModel && imagePreview) ? imagePreview : undefined,
+          image: imagePayload?.[0],
+          images: imagePayload,
           provider,
           model: model.trim() || undefined,
           apiKey: apiKey.trim() || undefined,
@@ -822,36 +919,100 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
               );
             })()}
 
-            {/* Reference Image Dropzone */}
-            <div className="space-y-1">
-              <label className="text-neutral-600 dark:text-neutral-400 font-medium text-[11px] block">
-                Reference Image
-              </label>
+            {/* Multi-Image Reference Dropzone */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-neutral-600 dark:text-neutral-400 font-medium text-[11px] flex items-center space-x-1.5">
+                  <span>Reference Images</span>
+                  {referenceImages.length > 0 && (
+                    <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 text-neutral-600 dark:text-neutral-300">
+                      {referenceImages.length}/{MAX_REFERENCE_IMAGES}
+                    </span>
+                  )}
+                </label>
 
-              <div className="border border-neutral-200 hover:border-neutral-300 dark:border-neutral-800 dark:hover:border-neutral-700 rounded-lg p-3 text-center transition-colors bg-neutral-50 dark:bg-neutral-900/40">
-                {imagePreview ? (
-                  <div className="relative group">
-                    <img
-                      src={imagePreview}
-                      alt="Reference"
-                      className="max-h-36 mx-auto rounded-md object-contain"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setImagePreview(null)}
-                      className="absolute top-1 right-1 bg-white/95 hover:bg-neutral-100 border border-neutral-200 text-neutral-800 dark:bg-neutral-900/90 dark:hover:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-200 text-[10px] px-2 py-0.5 rounded shadow"
-                    >
-                      Clear
-                    </button>
+                {referenceImages.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setReferenceImages([])}
+                    className="text-[10px] text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors"
+                  >
+                    Clear all
+                  </button>
+                )}
+              </div>
+
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsDraggingImages(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsDraggingImages(false);
+                }}
+                onDrop={handleImageDrop}
+                className={`border rounded-lg p-2.5 transition-colors ${
+                  isDraggingImages
+                    ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-900'
+                    : 'border-neutral-200 hover:border-neutral-300 dark:border-neutral-800 dark:hover:border-neutral-700 bg-neutral-50 dark:bg-neutral-900/40'
+                }`}
+              >
+                {referenceImages.length > 0 ? (
+                  <div className="grid grid-cols-3 gap-2">
+                    {referenceImages.map((img, idx) => (
+                      <div
+                        key={img.id}
+                        className="relative group aspect-square rounded-md overflow-hidden border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                      >
+                        <img
+                          src={img.dataUrl}
+                          alt={img.name || `Reference ${idx + 1}`}
+                          className="w-full h-full object-cover"
+                        />
+                        <span className="absolute bottom-1 left-1 bg-neutral-950/80 text-white text-[9px] font-mono px-1.5 py-0.5 rounded">
+                          {idx + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveImage(img.id)}
+                          title="Remove image"
+                          className="absolute top-1 right-1 bg-white/95 hover:bg-neutral-100 border border-neutral-200 text-neutral-800 dark:bg-neutral-900/95 dark:hover:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-200 p-0.5 rounded transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+
+                    {referenceImages.length < MAX_REFERENCE_IMAGES && (
+                      <label className="aspect-square rounded-md border border-dashed border-neutral-300 hover:border-neutral-500 dark:border-neutral-700 dark:hover:border-neutral-500 bg-white dark:bg-neutral-950 flex flex-col items-center justify-center cursor-pointer text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white transition-colors">
+                        <Plus className="w-4 h-4 mb-0.5" />
+                        <span className="text-[10px] font-medium">Add</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={handleImageUpload}
+                          className="hidden"
+                        />
+                      </label>
+                    )}
                   </div>
                 ) : (
-                  <label className="cursor-pointer block py-3">
+                  <label className="cursor-pointer block py-3 text-center">
                     <Upload className="w-5 h-5 mx-auto text-neutral-400 dark:text-neutral-500 mb-1" />
-                    <span className="text-neutral-700 dark:text-neutral-300 text-xs font-normal">Click or drag image to sculpt</span>
-                    <span className="block text-[10px] text-neutral-500 mt-0.5">PNG, JPG, WebP</span>
+                    <span className="text-neutral-700 dark:text-neutral-300 text-xs font-normal">
+                      Click or drag images to sculpt
+                    </span>
+                    <span className="block text-[10px] text-neutral-500 mt-0.5">
+                      Select multiple views (up to {MAX_REFERENCE_IMAGES}) · PNG, JPG, WebP
+                    </span>
                     <input
                       type="file"
                       accept="image/*"
+                      multiple
                       onChange={handleImageUpload}
                       className="hidden"
                     />
@@ -859,8 +1020,8 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                 )}
               </div>
 
-              {imagePreview && (
-                <div className="flex items-center space-x-1.5 pt-1 text-[11px] text-neutral-600 dark:text-neutral-400">
+              {referenceImages.length > 0 && (
+                <div className="flex items-center space-x-1.5 pt-0.5 text-[11px] text-neutral-600 dark:text-neutral-400">
                   <input
                     type="checkbox"
                     id="sendImage"
@@ -869,7 +1030,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({
                     className="rounded bg-white dark:bg-neutral-950 border-neutral-300 dark:border-neutral-800 text-neutral-950 dark:text-white focus:ring-0 cursor-pointer"
                   />
                   <label htmlFor="sendImage" className="cursor-pointer text-[10px] text-neutral-600 dark:text-neutral-400 select-none">
-                    Send image payload (uncheck if using text/code-only model)
+                    Send {referenceImages.length} {referenceImages.length === 1 ? 'image' : 'images'} payload (uncheck for text/code-only models)
                   </label>
                 </div>
               )}

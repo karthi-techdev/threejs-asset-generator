@@ -110,8 +110,11 @@ app.post('/api/models', async (req, res) => {
 app.post('/api/generate', async (req, res) => {
   try {
     const payload = req.body as GenerateRequest;
-    if (!payload.prompt && !payload.image) {
-      return res.status(400).json({ error: 'Either prompt or image is required.' });
+    const hasImages =
+      Boolean(payload.image) ||
+      (Array.isArray(payload.images) && payload.images.some((img) => typeof img === 'string' && img.trim().length > 0));
+    if (!payload.prompt && !hasImages) {
+      return res.status(400).json({ error: 'Either prompt or at least one reference image is required.' });
     }
 
     const result = await runAgentOrchestrator(payload);

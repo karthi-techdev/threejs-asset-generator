@@ -2,12 +2,30 @@ import { buildEnrichedSystemPrompt } from './skillLoader.js';
 
 export interface GenerateRequest {
   prompt: string;
-  image?: string; // base64 data URL
+  image?: string; // legacy single base64 data URL
+  images?: string[]; // multiple base64 data URLs (multi-view / reference images)
   provider: 'gemini' | 'claude' | 'openai' | 'ollama' | 'custom' | 'demo';
   apiKey?: string;
   model?: string;
   currentCode?: string;
   baseUrl?: string; // for custom Ollama / OpenRouter / local / proxy endpoints
+}
+
+const MAX_REFERENCE_IMAGES = 8;
+
+function getRequestImages(req: GenerateRequest): string[] {
+  const list: string[] = [];
+  if (Array.isArray(req.images)) {
+    for (const img of req.images) {
+      if (typeof img === 'string' && img.trim()) {
+        list.push(img.trim());
+      }
+    }
+  }
+  if (list.length === 0 && typeof req.image === 'string' && req.image.trim()) {
+    list.push(req.image.trim());
+  }
+  return Array.from(new Set(list)).slice(0, MAX_REFERENCE_IMAGES);
 }
 
 export interface AgentResult {
@@ -88,15 +106,22 @@ async function callGemini(req: GenerateRequest): Promise<AgentResult> {
   const baseUrl = (req.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
   const url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, Boolean(req.image));
+  const images = getRequestImages(req);
+  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, images.length > 0);
   const parts: any[] = [{ text: systemPrompt }];
 
   if (req.currentCode) {
     parts.push({ text: `Current code to refine:\n\`\`\`typescript\n${req.currentCode}\n\`\`\`` });
   }
 
-  if (req.image) {
-    const mimeMatch = req.image.match(/^data:([^;]+);base64,(.+)$/);
+  if (images.length > 1) {
+    parts.push({
+      text: `You have been provided ${images.length} reference images showing different views/details of the target 3D asset. Synthesize geometry, proportions, colors, and surface details consistently across all views.`,
+    });
+  }
+
+  for (const img of images) {
+    const mimeMatch = img.match(/^data:([^;]+);base64,(.+)$/);
     if (mimeMatch) {
       parts.push({
         inline_data: {
@@ -138,12 +163,13 @@ async function callClaude(req: GenerateRequest): Promise<AgentResult> {
   const baseUrl = (req.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
   const url = `${baseUrl}/v1/messages`;
 
-  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, Boolean(req.image));
+  const images = getRequestImages(req);
+  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, images.length > 0);
 
   const content: any[] = [];
 
-  if (req.image) {
-    const mimeMatch = req.image.match(/^data:([^;]+);base64,(.+)$/);
+  for (const img of images) {
+    const mimeMatch = img.match(/^data:([^;]+);base64,(.+)$/);
     if (mimeMatch) {
       content.push({
         type: 'image',
@@ -157,6 +183,9 @@ async function callClaude(req: GenerateRequest): Promise<AgentResult> {
   }
 
   let promptText = req.prompt || 'Reconstruct this object as a procedural Three.js model.';
+  if (images.length > 1) {
+    promptText = `Use all ${images.length} reference images together (synthesizing geometry, proportions, and surface details consistently across every view).\n\n${promptText}`;
+  }
   if (req.currentCode) {
     promptText += `\n\nRefine this existing code:\n\`\`\`typescript\n${req.currentCode}\n\`\`\``;
   }
@@ -211,16 +240,20 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
   const model = req.model || (isOllama ? 'llama3.2-vision' : (isCustom ? 'anthropic/claude-3.5-sonnet' : 'gpt-4o'));
   const url = `${baseUrl}/chat/completions`;
 
+  const images = getRequestImages(req);
   const userContent: any[] = [];
 
-  if (req.image) {
+  for (const img of images) {
     userContent.push({
       type: 'image_url',
-      image_url: { url: req.image },
+      image_url: { url: img },
     });
   }
 
   let promptText = req.prompt || 'Reconstruct this object as a procedural Three.js model.';
+  if (images.length > 1) {
+    promptText = `Use all ${images.length} reference images together (synthesizing geometry, proportions, and surface details consistently across every view).\n\n${promptText}`;
+  }
   if (req.currentCode) {
     promptText += `\n\nRefine this existing code:\n\`\`\`typescript\n${req.currentCode}\n\`\`\``;
   }
@@ -233,7 +266,7 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
-  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, Boolean(req.image));
+  const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, images.length > 0);
 
   const res = await fetch(url, {
     method: 'POST',
@@ -252,7 +285,7 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
     const errText = await res.text();
 
     // Auto-fallback: If model rejects image payload (e.g. text/code-only models like poolside/legume-xs-2.1 or Groq)
-    if (req.image && (errText.includes('multimodal') || errText.includes('image_url') || errText.includes('does not support image') || errText.includes('400'))) {
+    if (images.length > 0 && (errText.includes('multimodal') || errText.includes('image_url') || errText.includes('does not support image') || errText.includes('400'))) {
       console.warn(`[agents] Model ${model} rejected multimodal payload (${errText.slice(0, 100)}). Retrying automatically in text-only mode...`);
 
       const textOnlyContent = [{ type: 'text', text: promptText }];
