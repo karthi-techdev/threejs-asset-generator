@@ -137,7 +137,12 @@ async function callGemini(req: GenerateRequest): Promise<AgentResult> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts }] }),
+    body: JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: {
+        maxOutputTokens: 16384,
+      },
+    }),
   });
 
   if (!res.ok) {
@@ -146,10 +151,15 @@ async function callGemini(req: GenerateRequest): Promise<AgentResult> {
   }
 
   const data = await res.json();
-  const textOutput = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const candidate = data.candidates?.[0];
+  const textOutput = candidate?.content?.parts?.[0]?.text || '';
   const { code, analysis } = extractCodeBlock(textOutput);
+  const truncatedNote =
+    candidate?.finishReason === 'MAX_TOKENS'
+      ? '[Warning: Output hit the model token limit and may be incomplete.]\n\n'
+      : '';
 
-  return { code, analysis, provider: 'gemini', model, appliedSkills };
+  return { code, analysis: `${truncatedNote}${analysis}`, provider: 'gemini', model, appliedSkills };
 }
 
 /**
@@ -202,7 +212,7 @@ async function callClaude(req: GenerateRequest): Promise<AgentResult> {
       model,
       system: systemPrompt,
       messages: [{ role: 'user', content }],
-      max_tokens: 4096,
+      max_tokens: 8192,
     }),
   });
 
@@ -214,8 +224,12 @@ async function callClaude(req: GenerateRequest): Promise<AgentResult> {
   const data = await res.json();
   const textOutput = data.content?.[0]?.text || '';
   const { code, analysis } = extractCodeBlock(textOutput);
+  const truncatedNote =
+    data.stop_reason === 'max_tokens'
+      ? '[Warning: Output hit the model token limit and may be incomplete.]\n\n'
+      : '';
 
-  return { code, analysis, provider: 'claude', model, appliedSkills };
+  return { code, analysis: `${truncatedNote}${analysis}`, provider: 'claude', model, appliedSkills };
 }
 
 /**
@@ -268,7 +282,7 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
 
   const { prompt: systemPrompt, appliedSkills } = buildEnrichedSystemPrompt(req.prompt, images.length > 0);
 
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -278,8 +292,28 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
         { role: 'user', content: userContent },
       ],
       temperature: 0.2,
+      max_tokens: 16384,
     }),
   });
+
+  // Some OpenAI-compatible proxies reject max_tokens > their model cap; retry without explicit max_tokens
+  if (!res.ok && res.status === 400) {
+    const peekErr = await res.clone().text();
+    if (/max_tokens|max_completion_tokens/i.test(peekErr)) {
+      res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.2,
+        }),
+      });
+    }
+  }
 
   if (!res.ok) {
     const errText = await res.text();
@@ -299,6 +333,7 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
             { role: 'user', content: textOnlyContent },
           ],
           temperature: 0.2,
+          max_tokens: 16384,
         }),
       });
 
@@ -324,14 +359,19 @@ async function callOpenAICompatible(req: GenerateRequest, providerType: string =
   }
 
   const data = await res.json();
-  const msg = data.choices?.[0]?.message;
+  const choice = data.choices?.[0];
+  const msg = choice?.message;
   const textOutput =
     (typeof msg?.content === 'string' && msg.content.trim()
       ? msg.content
       : msg?.reasoning_content || msg?.reasoning || '') || '';
   const { code, analysis } = extractCodeBlock(textOutput);
+  const truncatedNote =
+    choice?.finish_reason === 'length'
+      ? '[Warning: Model output hit max_tokens and was cut off mid-code. Try regenerating or simplifying the prompt.]\n\n'
+      : '';
 
-  return { code, analysis, provider: providerType, model, appliedSkills };
+  return { code, analysis: `${truncatedNote}${analysis}`, provider: providerType, model, appliedSkills };
 }
 
 /**

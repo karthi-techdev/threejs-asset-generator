@@ -13,7 +13,8 @@ import {
   Box,
   FileCode2,
   RotateCcw,
-  Film
+  Film,
+  AlertCircle
 } from 'lucide-react';
 
 interface Viewport3DProps {
@@ -96,6 +97,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   );
   const [polyCount, setPolyCount] = useState(0);
   const [fps, setFps] = useState(60);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
 
   const activeAnimation = controlledAnimation !== undefined ? controlledAnimation : internalAnimation;
 
@@ -378,22 +380,35 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         setInternalAnimation(null);
         activeAnimationRef.current = null;
         onAnimationsDetected?.([], null);
+        setRuntimeError(null);
         onCodeError?.(null);
         return;
       }
 
-      // Compile function from source code
-      let cleaned = safeCode
-        .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?/g, '')
-        .replace(/export\s+function\s+createModel/g, 'function createModel')
-        .replace(/export\s+default\s+function/g, 'function createModel')
-        .replace(/export\s+/g, '');
+      // Sanitize ES module imports/exports safely without breaking `export default function createModel` or trailing `export default`
+      const cleaned = safeCode
+        .replace(/^\s*import\s+[\s\S]*?from\s+['"][^'"]+['"]\s*;?/gm, '')
+        .replace(/^\s*import\s+['"][^'"]+['"]\s*;?/gm, '')
+        .replace(/^\s*export\s+default\s+function\s*\(/gm, 'function createModel(')
+        .replace(/^\s*export\s+default\s+function\s+([a-zA-Z0-9_$]+)/gm, 'function $1')
+        .replace(/^\s*export\s+default\s+[a-zA-Z0-9_$]+\s*;?\s*$/gm, '')
+        .replace(/^\s*export\s*\{[\s\S]*?\}\s*;?\s*$/gm, '')
+        .replace(
+          /^(\s*)export\s+(?=(?:async\s+)?(?:function|const|let|var|class|interface|type|enum)\b)/gm,
+          '$1'
+        );
 
-      let transpiled = cleaned;
+      let transpiled: string;
       try {
         transpiled = transform(cleaned, { transforms: ['typescript'] }).code;
       } catch (tsErr: any) {
-        console.warn('Sucrase TypeScript stripping warning:', tsErr);
+        const msg = tsErr?.message || String(tsErr);
+        const lineCount = cleaned.split('\n').length;
+        const nearEndHint =
+          msg.includes(`(${lineCount}:`) || msg.includes('Unexpected token')
+            ? ' (Generated code may have been cut off by the model output limit — inspect the end of the Code Editor tab or regenerate.)'
+            : '';
+        throw new Error(`TypeScript compile error: ${msg}${nearEndHint}`);
       }
 
       // Evaluate within a scoped sandbox passing THREE
@@ -530,6 +545,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         }
       }
 
+      setRuntimeError(null);
       onCodeError?.(null);
 
       // Send rendered frame capture to backend for vision agent feedback
@@ -538,7 +554,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }, 400);
     } catch (err: any) {
       console.error('Live Three.js execution error:', err);
-      onCodeError?.(err.message || 'Execution error');
+      const errMsg = err?.message || 'Execution error';
+      setRuntimeError(errMsg);
+      onCodeError?.(errMsg);
     }
   }, [code, wireframe, sessionId]);
 
@@ -807,6 +825,19 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
             <div className="text-sm font-medium text-neutral-800 dark:text-neutral-300">Ready to Sculpt</div>
             <div className="text-xs text-neutral-500 max-w-xs leading-relaxed">
               Connect an AI agent to generate procedural Three.js models, or paste code into the editor.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Visible Viewport Error Banner when code fails to compile/run */}
+      {runtimeError && (
+        <div className="absolute top-14 left-3 right-3 max-w-xl bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md p-3 z-20 flex items-start space-x-2.5 text-xs">
+          <AlertCircle className="w-4 h-4 text-neutral-700 dark:text-neutral-300 flex-shrink-0 mt-0.5" />
+          <div className="space-y-0.5 min-w-0">
+            <div className="font-medium text-neutral-950 dark:text-white">Could not render generated model</div>
+            <div className="font-mono text-[11px] text-neutral-600 dark:text-neutral-400 break-words leading-relaxed">
+              {runtimeError}
             </div>
           </div>
         </div>
