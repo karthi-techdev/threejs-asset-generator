@@ -689,51 +689,93 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   const handleExportGLB = () => {
     if (!currentModelRef.current) return;
 
-    // Clone and sanitize model so custom ShaderMaterials are converted to standard glTF PBR materials
-    const exportRoot = currentModelRef.current.clone(true);
-    exportRoot.traverse((node) => {
-      const mesh = node as THREE.Mesh;
-      if (mesh.isMesh) {
-        const convertMat = (mat: THREE.Material): THREE.Material => {
-          if (mat.userData?.gltfMaterial instanceof THREE.Material) {
-            return mat.userData.gltfMaterial.clone();
-          }
-          if ((mat as THREE.ShaderMaterial).isShaderMaterial) {
-            return convertShaderMaterialToStandard(mat as THREE.ShaderMaterial);
-          }
-          return mat.clone();
-        };
+    try {
+      // Temporarily stash node userData while cloning so non-serializable / circular refs
+      // (e.g. animation functions or rig references) cannot throw inside Object3D.copy()
+      const savedUserData = new Map<THREE.Object3D, Record<string, any>>();
+      let exportRoot: THREE.Object3D;
+      try {
+        currentModelRef.current.traverse((node) => {
+          savedUserData.set(node, node.userData);
+          node.userData = {};
+        });
+        exportRoot = currentModelRef.current.clone(true);
+      } finally {
+        savedUserData.forEach((ud, node) => {
+          node.userData = ud;
+        });
+      }
 
-        if (Array.isArray(mesh.material)) {
-          mesh.material = mesh.material.map(convertMat);
-        } else if (mesh.material) {
-          mesh.material = convertMat(mesh.material);
+      // Sanitize materials so custom ShaderMaterials become standard glTF PBR materials
+      exportRoot.traverse((node) => {
+        node.userData = {};
+        const mesh = node as THREE.Mesh;
+        if (mesh.isMesh) {
+          const safeCloneMat = (sourceMat: THREE.Material): THREE.Material => {
+            const origUd = sourceMat.userData;
+            try {
+              sourceMat.userData = {};
+              const cloned = sourceMat.clone();
+              cloned.userData = {};
+              return cloned;
+            } finally {
+              sourceMat.userData = origUd;
+            }
+          };
+
+          const convertMat = (mat: THREE.Material): THREE.Material => {
+            if (mat.userData?.gltfMaterial instanceof THREE.Material) {
+              return safeCloneMat(mat.userData.gltfMaterial);
+            }
+            if ((mat as THREE.ShaderMaterial).isShaderMaterial) {
+              const converted = convertShaderMaterialToStandard(mat as THREE.ShaderMaterial);
+              converted.userData = {};
+              return converted;
+            }
+            return safeCloneMat(mat);
+          };
+
+          if (Array.isArray(mesh.material)) {
+            mesh.material = mesh.material.map(convertMat);
+          } else if (mesh.material) {
+            mesh.material = convertMat(mesh.material);
+          }
         }
-      }
-    });
+      });
 
-    const exporter = new GLTFExporter();
-    exporter.parse(
-      exportRoot,
-      (gltf) => {
-        const blob = new Blob([gltf as ArrayBuffer], { type: 'model/gltf-binary' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${currentModelRef.current?.name || 'model'}.glb`;
-        a.click();
-        URL.revokeObjectURL(url);
-      },
-      (error) => {
-        console.error('GLTF Export error:', error);
-      },
-      {
-        binary: true,
-        animations: currentModelRef.current.animations?.length
-          ? currentModelRef.current.animations
-          : undefined,
-      }
-    );
+      const exportAnimations = Array.isArray(currentModelRef.current.animations)
+        ? currentModelRef.current.animations.filter(
+            (clip): clip is THREE.AnimationClip => clip instanceof THREE.AnimationClip
+          )
+        : [];
+
+      const exporter = new GLTFExporter();
+      exporter.parse(
+        exportRoot,
+        (gltf) => {
+          const blob = new Blob([gltf as ArrayBuffer], { type: 'model/gltf-binary' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${(currentModelRef.current?.name || 'model').replace(/[^a-zA-Z0-9._-]/g, '_')}.glb`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        },
+        (error) => {
+          console.error('GLTF Export error:', error);
+          onCodeError?.(`GLB export failed: ${error?.message || String(error)}`);
+        },
+        {
+          binary: true,
+          animations: exportAnimations,
+        }
+      );
+    } catch (err: any) {
+      console.error('GLTF Export error:', err);
+      onCodeError?.(`GLB export failed: ${err?.message || String(err)}`);
+    }
   };
 
   /**
