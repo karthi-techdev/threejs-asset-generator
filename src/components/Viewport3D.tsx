@@ -562,12 +562,39 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
 
   /**
    * Captures the rendered WebGL canvas screenshot and sends to API server
+   * (Downscaled to max 640px and JPEG compressed for ultra-fast, lightweight MCP transfer)
    */
   const captureAndPushRender = useCallback(async () => {
     const cleanSession = sessionId.trim();
     if (!rendererRef.current || !cleanSession) return;
     try {
-      const dataUrl = rendererRef.current.domElement.toDataURL('image/png', 0.85);
+      const srcCanvas = rendererRef.current.domElement;
+      if (!srcCanvas || srcCanvas.width === 0 || srcCanvas.height === 0) return;
+
+      // Downscale to max 640px so MCP tool responses stay around ~25KB instead of 3MB,
+      // preventing client timeouts and freezing in web chat interfaces like Gemini Web.
+      const maxDim = 640;
+      let w = srcCanvas.width;
+      let h = srcCanvas.height;
+      if (w > maxDim || h > maxDim) {
+        if (w >= h) {
+          h = Math.round((h * maxDim) / w);
+          w = maxDim;
+        } else {
+          w = Math.round((w * maxDim) / h);
+          h = maxDim;
+        }
+      }
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = w;
+      tempCanvas.height = h;
+      const ctx = tempCanvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(srcCanvas, 0, 0, w, h);
+
+      const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.75);
+
       await fetch(`/api/sessions/${encodeURIComponent(cleanSession)}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

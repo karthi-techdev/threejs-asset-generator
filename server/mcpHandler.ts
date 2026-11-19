@@ -322,7 +322,9 @@ export async function handleMcpRpcMessage(
       }
 
       const renderUrl = session.latestRender;
-      const base64Data = renderUrl.replace(/^data:image\/\w+;base64,/, '');
+      const mimeMatch = renderUrl.match(/^data:(image\/[a-zA-Z+]+);base64,/);
+      const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      const base64Data = renderUrl.replace(/^data:[^;]+;base64,/, '');
 
       return {
         jsonrpc: '2.0',
@@ -332,7 +334,7 @@ export async function handleMcpRpcMessage(
             {
               type: 'image',
               data: base64Data,
-              mimeType: 'image/png',
+              mimeType,
             },
             {
               type: 'text',

@@ -46,24 +46,32 @@ export class SessionStore {
     const cfg = this.getRedisConfig();
     if (!cfg) return null;
 
-    const res = await fetch(cfg.url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${cfg.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(command),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
 
-    if (!res.ok) {
-      throw new Error(`Redis REST error (${res.status})`);
-    }
+    try {
+      const res = await fetch(cfg.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(command),
+        signal: controller.signal,
+      });
 
-    const data = (await res.json()) as { result?: T; error?: string };
-    if (data.error) {
-      throw new Error(`Redis command error: ${data.error}`);
+      if (!res.ok) {
+        throw new Error(`Redis REST error (${res.status})`);
+      }
+
+      const data = (await res.json()) as { result?: T; error?: string };
+      if (data.error) {
+        throw new Error(`Redis command error: ${data.error}`);
+      }
+      return data.result ?? null;
+    } finally {
+      clearTimeout(timeout);
     }
-    return data.result ?? null;
   }
 
   public async getSession(rawToken: string): Promise<SessionState | null> {
@@ -92,7 +100,7 @@ export class SessionStore {
       throw new Error('Invalid or empty session token.');
     }
 
-    const existing = (await this.getSession(id)) || {
+    const existing = this.memoryMap.get(id) || {
       id,
       title: title || 'Procedural 3D Asset',
       code: '',
@@ -128,7 +136,7 @@ export class SessionStore {
       throw new Error('Invalid or empty session token.');
     }
 
-    const existing = (await this.getSession(id)) || {
+    const existing = this.memoryMap.get(id) || {
       id,
       title: 'Procedural 3D Asset',
       code: '',
