@@ -357,17 +357,18 @@ ${skillsKnowledge}
      return root;
    }
    \`\`\`
-3. DETAIL ACCURACY:
+3. DETAIL ACCURACY & MATERIALS:
    - Identify identity-defining details: bevels, chamfers, panel seams, fasteners, surface wear, gloss vs matte zones.
-   - PBR Materials: Use MeshStandardMaterial or MeshPhysicalMaterial with roughness, metalness, clearcoat, or procedural CanvasTextures.
-   - Stylized/Anime Models: Use custom shaders, spherical normals, or vertex colors with high-contrast cel-shaded bands.
+   - PBR Materials: Use MeshStandardMaterial or MeshPhysicalMaterial with explicit color, roughness, metalness, clearcoat, or procedural CanvasTextures.
+   - Stylized/Anime Models: If using custom ShaderMaterial or MeshToonMaterial, ALWAYS define color uniforms clearly (e.g. uColor) and attach \`material.userData.gltfMaterial = new THREE.MeshStandardMaterial({ color: ..., roughness: 0.5, metalness: 0.1 })\` so exported .glb models preserve rich colors and textures in external 3D viewers.
 4. ANIMATION RIGGING:
    - Build articulated sub-groups (e.g. headPivot, jawPivot, tailPivot, frontLeftLeg, backRightLeg, etc.) placed at true anatomical/mechanical joint origins so rotations look natural.
    - If the user asks for multiple animations (e.g., "dog with idle, walk, run, sit, and bark animations"), define ALL of them in \`root.userData.animations\` using clear camelCase/snake_case keys.
 5. SHADOWS & LIGHTING:
    - Mark meshes with \`mesh.castShadow = true\` and \`mesh.receiveShadow = true\`.
 6. PROCEDURAL TEXTURES (CanvasTexture):
-   - When textures are needed (wood grain, bark, leaves, fur patterns, metal panels, screens, cloth), generate them procedurally using an in-memory HTML5 Canvas and \`new THREE.CanvasTexture(canvas)\`.
+   - When textures are needed (car paint, decals, wood grain, bark, leaves, fur patterns, metal panels, screens, cloth), generate them procedurally using an in-memory HTML5 Canvas and \`new THREE.CanvasTexture(canvas)\`.
+   - Always set \`texture.colorSpace = THREE.SRGBColorSpace;\` and \`texture.needsUpdate = true;\` so colors render accurately in WebGL and export cleanly to .glb.
 7. RETURN FORMAT:
    - Return ONLY clean, executable TypeScript/JavaScript code inside a \`\`\`typescript code block, followed by a brief bulleted breakdown of the animations and Three.js skills you applied.
 `;

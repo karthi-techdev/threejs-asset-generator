@@ -638,67 +638,346 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
     texture.wrapT = colorTex.wrapT;
     texture.repeat.copy(colorTex.repeat);
     texture.offset.copy(colorTex.offset);
+    texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
     return texture;
   };
 
   /**
-   * Converts non-standard ShaderMaterials into standard glTF-compliant MeshStandardMaterials.
+   * Ensures that a BufferGeometry has valid UV coordinates so external glTF viewers
+   * can correctly sample diffuse, normal, roughness, and canvas textures.
    */
-  const convertShaderMaterialToStandard = (shaderMat: THREE.ShaderMaterial): THREE.MeshStandardMaterial => {
-    if (shaderMat.userData?.gltfMaterial instanceof THREE.Material) {
-      return shaderMat.userData.gltfMaterial.clone() as THREE.MeshStandardMaterial;
-    }
+  const ensureGeometryUVs = (geometry: THREE.BufferGeometry) => {
+    if (geometry.attributes.uv) return;
+    const pos = geometry.attributes.position;
+    if (!pos || pos.count === 0) return;
 
-    const uniforms = (shaderMat.uniforms || {}) as Record<string, { value: unknown }>;
-    const isTexture = (v: unknown): v is THREE.Texture =>
-      !!v && typeof v === 'object' && (v as THREE.Texture).isTexture === true;
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox || new THREE.Box3();
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const min = bbox.min;
 
-    const colorCandidates = [
-      uniforms.uColorMap?.value,
-      uniforms.map?.value,
-      uniforms.diffuseMap?.value,
-      uniforms.baseTexture?.value,
-    ];
-    const colorTexture = colorCandidates.find((v): v is THREE.Texture => isTexture(v));
+    const dx = size.x > 0.0001 ? size.x : 1;
+    const dy = size.y > 0.0001 ? size.y : 1;
+    const dz = size.z > 0.0001 ? size.z : 1;
 
-    const alphaCandidates = [
-      uniforms.uAlphaMap?.value,
-      uniforms.alphaMap?.value,
-      uniforms.maskMap?.value,
-    ];
-    const alphaTexture = alphaCandidates.find((v): v is THREE.Texture => isTexture(v));
+    const uvs = new Float32Array(pos.count * 2);
+    const isHorizontal = size.y < Math.min(size.x, size.z) * 0.45;
 
-    let finalMap: THREE.Texture | undefined = colorTexture;
-    let hasAlpha = false;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
 
-    if (colorTexture) {
-      if (alphaTexture) {
-        finalMap = composeRgbaCanvasTexture(colorTexture, alphaTexture);
-        hasAlpha = true;
+      if (isHorizontal) {
+        uvs[i * 2] = (x - min.x) / dx;
+        uvs[i * 2 + 1] = (z - min.z) / dz;
       } else {
-        finalMap = colorTexture;
+        if (size.x >= size.z) {
+          uvs[i * 2] = (x - min.x) / dx;
+          uvs[i * 2 + 1] = (y - min.y) / dy;
+        } else {
+          uvs[i * 2] = (z - min.z) / dz;
+          uvs[i * 2 + 1] = (y - min.y) / dy;
+        }
       }
     }
 
-    let baseColor = new THREE.Color(0xffffff);
-    const colorVal = uniforms.uMidGreen?.value ?? uniforms.color?.value ?? uniforms.diffuse?.value;
-    if (colorVal instanceof THREE.Color) {
-      baseColor = colorVal.clone();
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  };
+
+  /**
+   * Converts any Three.js material (ShaderMaterial, MeshPhysicalMaterial, MeshToonMaterial,
+   * MeshPhongMaterial, MeshLambertMaterial, CanvasTexture) into standard glTF-compliant MeshStandardMaterial
+   * preserving all base colors, diffuse maps, canvas textures, roughness, metalness, and transparencies.
+   */
+  const convertAnyMaterialToStandard = (mat: THREE.Material): THREE.Material => {
+    if (!mat) return new THREE.MeshStandardMaterial({ color: 0xffffff });
+
+    const safeCloneMat = (sourceMat: THREE.Material): THREE.Material => {
+      const origUd = sourceMat.userData;
+      try {
+        sourceMat.userData = {};
+        const cloned = sourceMat.clone();
+        cloned.userData = {};
+        return cloned;
+      } finally {
+        sourceMat.userData = origUd;
+      }
+    };
+
+    if (mat.userData?.gltfMaterial instanceof THREE.Material) {
+      return safeCloneMat(mat.userData.gltfMaterial);
     }
 
-    return new THREE.MeshStandardMaterial({
-      name: shaderMat.name || 'shader-pbr',
-      map: finalMap ?? null,
-      color: finalMap ? 0xffffff : baseColor,
-      roughness: 0.8,
-      metalness: 0.05,
-      side: shaderMat.side ?? THREE.DoubleSide,
-      transparent: false,
-      alphaTest: hasAlpha || shaderMat.transparent ? 0.42 : 0.0,
-      depthWrite: shaderMat.depthWrite ?? true,
-      wireframe: shaderMat.wireframe ?? false,
-    });
+    const sanitizeTexture = (tex?: THREE.Texture | null, isColor = false): THREE.Texture | null => {
+      if (!tex || typeof tex !== 'object' || !(tex as any).isTexture) return null;
+      if (isColor) {
+        tex.colorSpace = THREE.SRGBColorSpace;
+      }
+      tex.needsUpdate = true;
+      return tex;
+    };
+
+    // 1. Custom ShaderMaterials / RawShaderMaterials
+    if ((mat as THREE.ShaderMaterial).isShaderMaterial || (mat as any).isRawShaderMaterial) {
+      const shaderMat = mat as THREE.ShaderMaterial;
+      const uniforms = (shaderMat.uniforms || {}) as Record<string, { value: unknown }>;
+      const isTexture = (v: unknown): v is THREE.Texture =>
+        !!v && typeof v === 'object' && (v as THREE.Texture).isTexture === true;
+
+      let colorTexture: THREE.Texture | null = null;
+      let alphaTexture: THREE.Texture | null = null;
+      let normalTexture: THREE.Texture | null = null;
+      let roughnessTexture: THREE.Texture | null = null;
+      let metalnessTexture: THREE.Texture | null = null;
+      let emissiveTexture: THREE.Texture | null = null;
+      let aoTexture: THREE.Texture | null = null;
+
+      const preferredDiffuseKeys = [
+        'map', 'uMap', 'uColorMap', 'diffuseMap', 'uDiffuseMap', 'baseTexture',
+        'uBaseTexture', 'tDiffuse', 'uTexture', 'texture', 'mainTex', 'uMainTex',
+        'albedoMap', 'uAlbedoMap', 'colorTex', 'uColorTex', 'sTexture'
+      ];
+      for (const key of preferredDiffuseKeys) {
+        const v = uniforms[key]?.value;
+        if (isTexture(v)) {
+          colorTexture = v;
+          break;
+        }
+      }
+
+      for (const [key, item] of Object.entries(uniforms)) {
+        const v = item?.value;
+        if (!isTexture(v)) continue;
+        const k = key.toLowerCase();
+        if (!colorTexture && (k.includes('map') || k.includes('tex') || k.includes('color') || k.includes('diffuse') || k.includes('albedo'))) {
+          colorTexture = v;
+        } else if (!normalTexture && (k.includes('normal') || k.includes('norm'))) {
+          normalTexture = v;
+        } else if (!roughnessTexture && (k.includes('rough'))) {
+          roughnessTexture = v;
+        } else if (!metalnessTexture && (k.includes('metal'))) {
+          metalnessTexture = v;
+        } else if (!emissiveTexture && (k.includes('emiss') || k.includes('emit') || k.includes('glow'))) {
+          emissiveTexture = v;
+        } else if (!aoTexture && (k.includes('ao') || k.includes('occlu') || k.includes('ambient'))) {
+          aoTexture = v;
+        } else if (!alphaTexture && (k.includes('alpha') || k.includes('mask') || k.includes('opac'))) {
+          alphaTexture = v;
+        }
+      }
+
+      let finalMap: THREE.Texture | null = colorTexture;
+      let hasAlpha = false;
+
+      if (colorTexture) {
+        if (alphaTexture) {
+          finalMap = composeRgbaCanvasTexture(colorTexture, alphaTexture);
+          hasAlpha = true;
+        } else {
+          finalMap = colorTexture;
+        }
+      }
+
+      let baseColor: THREE.Color | null = null;
+      const preferredColorKeys = [
+        'uColor', 'color', 'diffuse', 'uDiffuse', 'baseColor', 'uBaseColor',
+        'albedo', 'uAlbedo', 'mainColor', 'uMainColor', 'carColor', 'paintColor',
+        'bodyColor', 'tint', 'uTint', 'surfaceColor', 'uSurfaceColor', 'uMidGreen',
+        'primaryColor', 'uBase', 'base'
+      ];
+
+      for (const key of preferredColorKeys) {
+        const val = uniforms[key]?.value;
+        if (val instanceof THREE.Color) {
+          baseColor = val.clone();
+          break;
+        } else if (typeof val === 'number') {
+          baseColor = new THREE.Color(val);
+          break;
+        } else if (typeof val === 'string' && /^#?[0-9a-fA-F]{3,8}$/.test(val.trim())) {
+          baseColor = new THREE.Color(val.trim());
+          break;
+        } else if (val && typeof val === 'object' && 'r' in val && 'g' in val && 'b' in val) {
+          baseColor = new THREE.Color((val as any).r, (val as any).g, (val as any).b);
+          break;
+        }
+      }
+
+      if (!baseColor) {
+        for (const [key, item] of Object.entries(uniforms)) {
+          const val = item?.value;
+          if (val instanceof THREE.Color) {
+            const kl = key.toLowerCase();
+            if (!kl.includes('shadow') && !kl.includes('light') && !kl.includes('ambient')) {
+              baseColor = val.clone();
+              break;
+            }
+          }
+        }
+      }
+
+      if (!baseColor) {
+        baseColor = new THREE.Color(0xffffff);
+      }
+
+      let roughness = 0.5;
+      let metalness = 0.1;
+      for (const [k, item] of Object.entries(uniforms)) {
+        const kl = k.toLowerCase();
+        const val = item?.value;
+        if (typeof val === 'number' && !isNaN(val)) {
+          if (kl.includes('rough')) roughness = Math.max(0, Math.min(1, val));
+          if (kl.includes('metal')) metalness = Math.max(0, Math.min(1, val));
+        }
+      }
+
+      const matName = (shaderMat.name || '').toLowerCase();
+      if (matName.includes('car') || matName.includes('body') || matName.includes('paint') || matName.includes('gloss')) {
+        roughness = Math.min(roughness, 0.25);
+        metalness = Math.max(metalness, 0.15);
+      } else if (matName.includes('tire') || matName.includes('rubber')) {
+        roughness = 0.85;
+        metalness = 0.02;
+      } else if (matName.includes('metal') || matName.includes('chrome') || matName.includes('rim')) {
+        roughness = Math.min(roughness, 0.2);
+        metalness = Math.max(metalness, 0.8);
+      }
+
+      return new THREE.MeshStandardMaterial({
+        name: shaderMat.name || 'shader-pbr',
+        color: baseColor,
+        map: sanitizeTexture(finalMap, true),
+        normalMap: sanitizeTexture(normalTexture),
+        roughnessMap: sanitizeTexture(roughnessTexture),
+        metalnessMap: sanitizeTexture(metalnessTexture),
+        emissiveMap: sanitizeTexture(emissiveTexture, true),
+        aoMap: sanitizeTexture(aoTexture),
+        roughness,
+        metalness,
+        transparent: shaderMat.transparent || hasAlpha,
+        opacity: typeof shaderMat.opacity === 'number' ? shaderMat.opacity : 1.0,
+        alphaTest: hasAlpha || shaderMat.transparent ? 0.35 : 0.0,
+        side: shaderMat.side ?? THREE.DoubleSide,
+        depthWrite: shaderMat.depthWrite ?? true,
+        wireframe: shaderMat.wireframe ?? false,
+      });
+    }
+
+    // 2. MeshPhysicalMaterial (standardize for 100% glTF viewer compatibility)
+    if ((mat as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
+      const physMat = mat as THREE.MeshPhysicalMaterial;
+      return new THREE.MeshStandardMaterial({
+        name: physMat.name || 'physical-pbr',
+        color: physMat.color ? physMat.color.clone() : new THREE.Color(0xffffff),
+        map: sanitizeTexture(physMat.map, true),
+        normalMap: sanitizeTexture(physMat.normalMap),
+        roughnessMap: sanitizeTexture(physMat.roughnessMap),
+        metalnessMap: sanitizeTexture(physMat.metalnessMap),
+        aoMap: sanitizeTexture(physMat.aoMap),
+        emissive: physMat.emissive ? physMat.emissive.clone() : new THREE.Color(0x000000),
+        emissiveMap: sanitizeTexture(physMat.emissiveMap, true),
+        roughness: typeof physMat.roughness === 'number' ? physMat.roughness : 0.5,
+        metalness: typeof physMat.metalness === 'number' ? physMat.metalness : 0.1,
+        transparent: physMat.transparent || (physMat.transmission > 0),
+        opacity: physMat.transmission > 0 ? Math.max(0.25, 1.0 - physMat.transmission * 0.75) : (physMat.opacity ?? 1.0),
+        alphaTest: physMat.alphaTest || 0,
+        side: physMat.side ?? THREE.FrontSide,
+        depthWrite: physMat.depthWrite ?? true,
+        wireframe: physMat.wireframe ?? false,
+      });
+    }
+
+    // 3. MeshToonMaterial (convert cel shading to standard PBR)
+    if ((mat as any).isMeshToonMaterial) {
+      const toonMat = mat as any;
+      return new THREE.MeshStandardMaterial({
+        name: toonMat.name || 'toon-pbr',
+        color: toonMat.color ? toonMat.color.clone() : new THREE.Color(0xffffff),
+        map: sanitizeTexture(toonMat.map, true),
+        normalMap: sanitizeTexture(toonMat.normalMap),
+        aoMap: sanitizeTexture(toonMat.aoMap),
+        emissive: toonMat.emissive ? toonMat.emissive.clone() : new THREE.Color(0x000000),
+        emissiveMap: sanitizeTexture(toonMat.emissiveMap, true),
+        roughness: 0.55,
+        metalness: 0.05,
+        transparent: Boolean(toonMat.transparent),
+        opacity: typeof toonMat.opacity === 'number' ? toonMat.opacity : 1.0,
+        alphaTest: toonMat.alphaTest || 0,
+        side: toonMat.side ?? THREE.FrontSide,
+        depthWrite: toonMat.depthWrite ?? true,
+        wireframe: toonMat.wireframe ?? false,
+      });
+    }
+
+    // 4. MeshPhongMaterial
+    if ((mat as any).isMeshPhongMaterial) {
+      const phongMat = mat as any;
+      const shininess = typeof phongMat.shininess === 'number' ? phongMat.shininess : 30;
+      const roughness = Math.max(0.04, Math.min(1.0, 1.0 - (shininess / 100)));
+      return new THREE.MeshStandardMaterial({
+        name: phongMat.name || 'phong-pbr',
+        color: phongMat.color ? phongMat.color.clone() : new THREE.Color(0xffffff),
+        map: sanitizeTexture(phongMat.map, true),
+        normalMap: sanitizeTexture(phongMat.normalMap),
+        bumpMap: sanitizeTexture(phongMat.bumpMap),
+        aoMap: sanitizeTexture(phongMat.aoMap),
+        emissive: phongMat.emissive ? phongMat.emissive.clone() : new THREE.Color(0x000000),
+        emissiveMap: sanitizeTexture(phongMat.emissiveMap, true),
+        roughness,
+        metalness: 0.1,
+        transparent: Boolean(phongMat.transparent),
+        opacity: typeof phongMat.opacity === 'number' ? phongMat.opacity : 1.0,
+        alphaTest: phongMat.alphaTest || 0,
+        side: phongMat.side ?? THREE.FrontSide,
+        depthWrite: phongMat.depthWrite ?? true,
+        wireframe: phongMat.wireframe ?? false,
+      });
+    }
+
+    // 5. MeshLambertMaterial
+    if ((mat as any).isMeshLambertMaterial) {
+      const lambertMat = mat as any;
+      return new THREE.MeshStandardMaterial({
+        name: lambertMat.name || 'lambert-pbr',
+        color: lambertMat.color ? lambertMat.color.clone() : new THREE.Color(0xffffff),
+        map: sanitizeTexture(lambertMat.map, true),
+        emissive: lambertMat.emissive ? lambertMat.emissive.clone() : new THREE.Color(0x000000),
+        emissiveMap: sanitizeTexture(lambertMat.emissiveMap, true),
+        aoMap: sanitizeTexture(lambertMat.aoMap),
+        roughness: 0.8,
+        metalness: 0.0,
+        transparent: Boolean(lambertMat.transparent),
+        opacity: typeof lambertMat.opacity === 'number' ? lambertMat.opacity : 1.0,
+        alphaTest: lambertMat.alphaTest || 0,
+        side: lambertMat.side ?? THREE.FrontSide,
+        depthWrite: lambertMat.depthWrite ?? true,
+        wireframe: lambertMat.wireframe ?? false,
+      });
+    }
+
+    // 6. MeshStandardMaterial
+    if ((mat as THREE.MeshStandardMaterial).isMeshStandardMaterial) {
+      const stdMat = safeCloneMat(mat) as THREE.MeshStandardMaterial;
+      if (stdMat.map) sanitizeTexture(stdMat.map, true);
+      if (stdMat.emissiveMap) sanitizeTexture(stdMat.emissiveMap, true);
+      if (stdMat.normalMap) sanitizeTexture(stdMat.normalMap);
+      if (stdMat.roughnessMap) sanitizeTexture(stdMat.roughnessMap);
+      if (stdMat.metalnessMap) sanitizeTexture(stdMat.metalnessMap);
+      if (stdMat.aoMap) sanitizeTexture(stdMat.aoMap);
+      return stdMat;
+    }
+
+    // 7. MeshBasicMaterial
+    if ((mat as THREE.MeshBasicMaterial).isMeshBasicMaterial) {
+      const basicMat = safeCloneMat(mat) as THREE.MeshBasicMaterial;
+      if (basicMat.map) sanitizeTexture(basicMat.map, true);
+      return basicMat;
+    }
+
+    return safeCloneMat(mat);
   };
 
   /**
@@ -729,34 +1008,28 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         node.userData = {};
         const mesh = node as THREE.Mesh;
         if (mesh.isMesh) {
-          const safeCloneMat = (sourceMat: THREE.Material): THREE.Material => {
-            const origUd = sourceMat.userData;
-            try {
-              sourceMat.userData = {};
-              const cloned = sourceMat.clone();
-              cloned.userData = {};
-              return cloned;
-            } finally {
-              sourceMat.userData = origUd;
-            }
-          };
+          // Clone geometry so modifications (UVs, vertex color cleanup) never affect live viewport
+          if (mesh.geometry) {
+            mesh.geometry = mesh.geometry.clone();
+            mesh.geometry.userData = {};
 
-          const convertMat = (mat: THREE.Material): THREE.Material => {
-            if (mat.userData?.gltfMaterial instanceof THREE.Material) {
-              return safeCloneMat(mat.userData.gltfMaterial);
+            // Strip non-vertex-color attribute if the material does not use vertex colors
+            const usesVertexColors = Array.isArray(mesh.material)
+              ? mesh.material.some((m) => m && (m as any).vertexColors === true)
+              : !!(mesh.material && (mesh.material as any).vertexColors === true);
+
+            if (!usesVertexColors && mesh.geometry.attributes.color) {
+              mesh.geometry.deleteAttribute('color');
             }
-            if ((mat as THREE.ShaderMaterial).isShaderMaterial) {
-              const converted = convertShaderMaterialToStandard(mat as THREE.ShaderMaterial);
-              converted.userData = {};
-              return converted;
-            }
-            return safeCloneMat(mat);
-          };
+
+            // Ensure UV attribute exists for reliable texture sampling across all glTF viewers
+            ensureGeometryUVs(mesh.geometry);
+          }
 
           if (Array.isArray(mesh.material)) {
-            mesh.material = mesh.material.map(convertMat);
+            mesh.material = mesh.material.map(convertAnyMaterialToStandard);
           } else if (mesh.material) {
-            mesh.material = convertMat(mesh.material);
+            mesh.material = convertAnyMaterialToStandard(mesh.material);
           }
         }
       });
