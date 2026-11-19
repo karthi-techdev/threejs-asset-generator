@@ -835,9 +835,32 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
 
       const matName = (shaderMat.name || '').toLowerCase();
-      if (matName.includes('car') || matName.includes('body') || matName.includes('paint') || matName.includes('gloss')) {
-        roughness = Math.min(roughness, 0.25);
-        metalness = Math.max(metalness, 0.15);
+      const isCarPaint =
+        matName.includes('car') ||
+        matName.includes('body') ||
+        matName.includes('paint') ||
+        matName.includes('gloss') ||
+        ('uGlossiness' in uniforms && 'uSpecThreshold' in uniforms) ||
+        ('uHighlight' in uniforms && 'uBase' in uniforms);
+
+      const isGlassOrTranslucent =
+        shaderMat.transparent === true ||
+        shaderMat.depthWrite === false ||
+        matName.includes('glass') ||
+        matName.includes('window') ||
+        matName.includes('windshield') ||
+        matName.includes('lens');
+
+      if (isGlassOrTranslucent) {
+        if (!baseColor || baseColor.getHex() === 0xffffff) {
+          // Transparent tinted automotive glass so interior and headlights remain clearly visible
+          baseColor = new THREE.Color(0x1a222d);
+        }
+        roughness = 0.05;
+        metalness = 0.1;
+      } else if (isCarPaint) {
+        roughness = 0.22;
+        metalness = 0.15;
       } else if (matName.includes('tire') || matName.includes('rubber')) {
         roughness = 0.85;
         metalness = 0.02;
@@ -845,6 +868,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         roughness = Math.min(roughness, 0.2);
         metalness = Math.max(metalness, 0.8);
       }
+
+      const opacity = isGlassOrTranslucent
+        ? typeof shaderMat.opacity === 'number' && shaderMat.opacity < 1.0
+          ? shaderMat.opacity
+          : 0.32
+        : typeof shaderMat.opacity === 'number'
+        ? shaderMat.opacity
+        : 1.0;
 
       return new THREE.MeshStandardMaterial({
         name: shaderMat.name || 'shader-pbr',
@@ -857,11 +888,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         aoMap: sanitizeTexture(aoTexture),
         roughness,
         metalness,
-        transparent: shaderMat.transparent || hasAlpha,
-        opacity: typeof shaderMat.opacity === 'number' ? shaderMat.opacity : 1.0,
-        alphaTest: hasAlpha || shaderMat.transparent ? 0.35 : 0.0,
+        transparent: isGlassOrTranslucent || shaderMat.transparent || hasAlpha,
+        opacity,
+        alphaTest: hasAlpha || (shaderMat.transparent && !isGlassOrTranslucent) ? 0.35 : 0.0,
         side: shaderMat.side ?? THREE.DoubleSide,
-        depthWrite: shaderMat.depthWrite ?? true,
+        depthWrite: isGlassOrTranslucent ? false : shaderMat.depthWrite ?? true,
         wireframe: shaderMat.wireframe ?? false,
       });
     }
@@ -1003,7 +1034,46 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         });
       }
 
-      // Sanitize materials so custom ShaderMaterials become standard glTF PBR materials
+      // 1. Remove inverted-hull outline meshes.
+      // In Three.js, inverted-hull cel outlines rely on a custom GLSL vertex shader that pushes
+      // back-faces outward along normals (position + normal * uThickness).
+      // glTF 2.0 has no custom vertex shaders, so these outline meshes export as duplicate,
+      // non-displaced pitch-black meshes right on top of the real body panels, occluding them completely.
+      const isOutlineMesh = (node: THREE.Object3D): boolean => {
+        if (!(node as THREE.Mesh).isMesh) return false;
+        const mesh = node as THREE.Mesh;
+        const mat = mesh.material;
+        if (!mat) return false;
+        const mats = Array.isArray(mat) ? mat : [mat];
+        return mats.some((m) => {
+          const hasThickness = (m as any).uniforms && 'uThickness' in (m as any).uniforms;
+          const isBackSide = m.side === THREE.BackSide;
+          const nameLower = ((m.name || '') + (node.name || '')).toLowerCase();
+          return (
+            hasThickness ||
+            (isBackSide &&
+              (nameLower.includes('outline') ||
+                nameLower.includes('hull') ||
+                nameLower.includes('ink') ||
+                nameLower.includes('stroke') ||
+                nameLower.includes('edge')))
+          );
+        });
+      };
+
+      const outlineNodes: THREE.Object3D[] = [];
+      exportRoot.traverse((node) => {
+        if (isOutlineMesh(node)) {
+          outlineNodes.push(node);
+        }
+      });
+      outlineNodes.forEach((node) => {
+        if (node.parent) {
+          node.parent.remove(node);
+        }
+      });
+
+      // 2. Sanitize materials and geometries so custom ShaderMaterials become standard glTF PBR materials
       exportRoot.traverse((node) => {
         node.userData = {};
         const mesh = node as THREE.Mesh;
