@@ -813,7 +813,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         'uColor', 'color', 'diffuse', 'uDiffuse', 'baseColor', 'uBaseColor',
         'albedo', 'uAlbedo', 'mainColor', 'uMainColor', 'carColor', 'paintColor',
         'bodyColor', 'tint', 'uTint', 'surfaceColor', 'uSurfaceColor', 'uMidGreen',
-        'primaryColor', 'uBase', 'base'
+        'primaryColor', 'uBase', 'base', 'uBaseCol', 'baseCol',
+        'uMid', 'midColor', 'uMidColor', 'uLit', 'litColor', 'uLitColor',
+        'uPaint', 'paint', 'uMain', 'main'
       ];
 
       for (const key of preferredColorKeys) {
@@ -834,15 +836,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
       }
 
       if (!baseColor) {
+        const candidateColors: { color: THREE.Color; score: number }[] = [];
         for (const [key, item] of Object.entries(uniforms)) {
           const val = item?.value;
           if (val instanceof THREE.Color) {
             const kl = key.toLowerCase();
-            if (!kl.includes('shadow') && !kl.includes('light') && !kl.includes('ambient')) {
-              baseColor = val.clone();
-              break;
+            if (kl.includes('shadow') || kl.includes('deep') || kl.includes('dark')) continue;
+            const brightness = val.r * 0.299 + val.g * 0.587 + val.b * 0.114;
+            let score = brightness;
+            if (kl.includes('mid') || kl.includes('lit') || kl.includes('paint') || kl.includes('body')) {
+              score += 2.0;
             }
+            candidateColors.push({ color: val.clone(), score });
           }
+        }
+        if (candidateColors.length > 0) {
+          candidateColors.sort((a, b) => b.score - a.score);
+          baseColor = candidateColors[0].color;
         }
       }
 
@@ -868,7 +878,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         matName.includes('paint') ||
         matName.includes('gloss') ||
         ('uGlossiness' in uniforms && 'uSpecThreshold' in uniforms) ||
-        ('uHighlight' in uniforms && 'uBase' in uniforms);
+        ('uHighlight' in uniforms && 'uBase' in uniforms) ||
+        ('uLit' in uniforms && 'uMid' in uniforms);
 
       const isGlassOrTranslucent =
         shaderMat.transparent === true ||
@@ -1039,13 +1050,216 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
   };
 
   /**
+   * Automatically bakes procedural JavaScript animation callbacks (root.userData.animations or root.userData.tick)
+   * into standard Three.js AnimationClip keyframe tracks for 100% glTF 2.0 PBR export compatibility in Sketchfab,
+   * Blender, Unity, and Unreal Engine.
+   */
+  const bakeProceduralAnimations = (
+    model: THREE.Object3D,
+    sampleDuration = 3.0,
+    fps = 30
+  ): THREE.AnimationClip[] => {
+    // 1. Discover procedural animation functions
+    const animMap: Record<string, (delta: number, elapsed: number) => void> = {};
+
+    const rawUserAnims = model.userData?.animations;
+    if (rawUserAnims && typeof rawUserAnims === 'object' && !Array.isArray(rawUserAnims)) {
+      for (const [name, fn] of Object.entries(rawUserAnims)) {
+        if (typeof fn === 'function') {
+          animMap[name] = fn as (delta: number, elapsed: number) => void;
+        }
+      }
+    }
+
+    if (Object.keys(animMap).length === 0 && typeof model.userData?.tick === 'function') {
+      animMap['idle'] = model.userData.tick;
+    }
+
+    if (Object.keys(animMap).length === 0) {
+      return [];
+    }
+
+    // 2. Collect rest poses for all nodes
+    interface NodeRestSnapshot {
+      node: THREE.Object3D;
+      pos: THREE.Vector3;
+      rot: THREE.Euler;
+      quat: THREE.Quaternion;
+      scale: THREE.Vector3;
+    }
+
+    const restSnapshots: NodeRestSnapshot[] = [];
+    model.traverse((node) => {
+      restSnapshots.push({
+        node,
+        pos: node.position.clone(),
+        rot: node.rotation.clone(),
+        quat: node.quaternion.clone(),
+        scale: node.scale.clone(),
+      });
+    });
+
+    const restoreRest = () => {
+      for (const s of restSnapshots) {
+        s.node.position.copy(s.pos);
+        s.node.rotation.copy(s.rot);
+        s.node.quaternion.copy(s.quat);
+        s.node.scale.copy(s.scale);
+        s.node.updateMatrix();
+      }
+      model.updateMatrixWorld(true);
+    };
+
+    const bakedClips: THREE.AnimationClip[] = [];
+    const dt = 1 / fps;
+    const frameCount = Math.round(sampleDuration * fps);
+
+    // Timeline array
+    const times: number[] = [];
+    for (let f = 0; f <= frameCount; f++) {
+      times.push(parseFloat((f * dt).toFixed(4)));
+    }
+
+    // 3. Sample each animation function
+    for (const [animName, animFn] of Object.entries(animMap)) {
+      restoreRest();
+
+      const nodeHistory = new Map<
+        THREE.Object3D,
+        {
+          positions: number[];
+          quaternions: number[];
+          scales: number[];
+          movedPos: boolean;
+          movedRot: boolean;
+          movedScale: boolean;
+        }
+      >();
+
+      for (const s of restSnapshots) {
+        nodeHistory.set(s.node, {
+          positions: [],
+          quaternions: [],
+          scales: [],
+          movedPos: false,
+          movedRot: false,
+          movedScale: false,
+        });
+      }
+
+      for (let f = 0; f <= frameCount; f++) {
+        const elapsed = f * dt;
+        try {
+          animFn(dt, elapsed);
+        } catch {
+          // ignore transient animation error during sample step
+        }
+        model.updateMatrixWorld(true);
+
+        for (const s of restSnapshots) {
+          const h = nodeHistory.get(s.node)!;
+          const p = s.node.position;
+          const q = s.node.quaternion;
+          const sc = s.node.scale;
+
+          h.positions.push(p.x, p.y, p.z);
+          h.quaternions.push(q.x, q.y, q.z, q.w);
+          h.scales.push(sc.x, sc.y, sc.z);
+
+          if (!h.movedPos && p.distanceToSquared(s.pos) > 1e-6) {
+            h.movedPos = true;
+          }
+          if (
+            !h.movedRot &&
+            (Math.abs(q.x - s.quat.x) > 1e-5 ||
+              Math.abs(q.y - s.quat.y) > 1e-5 ||
+              Math.abs(q.z - s.quat.z) > 1e-5 ||
+              Math.abs(q.w - s.quat.w) > 1e-5)
+          ) {
+            h.movedRot = true;
+          }
+          if (!h.movedScale && sc.distanceToSquared(s.scale) > 1e-6) {
+            h.movedScale = true;
+          }
+        }
+      }
+
+      const tracks: THREE.KeyframeTrack[] = [];
+      for (const s of restSnapshots) {
+        const h = nodeHistory.get(s.node)!;
+        const targetName = s.node.name;
+        if (!targetName) continue;
+
+        if (h.movedPos) {
+          tracks.push(new THREE.VectorKeyframeTrack(`${targetName}.position`, times, h.positions));
+        }
+        if (h.movedRot) {
+          tracks.push(
+            new THREE.QuaternionKeyframeTrack(`${targetName}.quaternion`, times, h.quaternions)
+          );
+        }
+        if (h.movedScale) {
+          tracks.push(new THREE.VectorKeyframeTrack(`${targetName}.scale`, times, h.scales));
+        }
+      }
+
+      if (tracks.length > 0) {
+        const clip = new THREE.AnimationClip(animName, sampleDuration, tracks);
+        bakedClips.push(clip);
+      }
+    }
+
+    // Always restore rest pose
+    restoreRest();
+
+    return bakedClips;
+  };
+
+  /**
    * Exports the active model to .GLB binary file with glTF-compliant PBR materials
    */
   const handleExportGLB = () => {
     if (!currentModelRef.current) return;
 
     try {
-      // Temporarily stash node userData while cloning so non-serializable / circular refs
+      // 1. Ensure all nodes in live model have clean, unique names before baking and cloning
+      const usedNames = new Set<string>();
+      let autoId = 1;
+      currentModelRef.current.traverse((node) => {
+        let name = (node.name || '').trim();
+        if (!name) {
+          name = `node_${autoId++}`;
+        }
+        let safe = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        let uniqueName = safe;
+        let suffix = 1;
+        while (usedNames.has(uniqueName)) {
+          uniqueName = `${safe}_${suffix++}`;
+        }
+        usedNames.add(uniqueName);
+        node.name = uniqueName;
+      });
+
+      // 2. Automatically bake procedural animations into standard THREE.AnimationClip keyframe tracks
+      const bakedClips = bakeProceduralAnimations(currentModelRef.current);
+
+      // Combine with any existing AnimationClips on model.animations
+      const existingClips = Array.isArray(currentModelRef.current.animations)
+        ? currentModelRef.current.animations.filter(
+            (clip): clip is THREE.AnimationClip => clip instanceof THREE.AnimationClip
+          )
+        : [];
+
+      const clipMap = new Map<string, THREE.AnimationClip>();
+      for (const c of bakedClips) {
+        clipMap.set(c.name, c);
+      }
+      for (const c of existingClips) {
+        clipMap.set(c.name, c);
+      }
+      const exportAnimations = Array.from(clipMap.values());
+
+      // 3. Temporarily stash node userData while cloning so non-serializable / circular refs
       // (e.g. animation functions or rig references) cannot throw inside Object3D.copy()
       const savedUserData = new Map<THREE.Object3D, Record<string, any>>();
       let exportRoot: THREE.Object3D;
@@ -1061,46 +1275,83 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
         });
       }
 
-      // 1. Remove inverted-hull outline meshes.
-      // In Three.js, inverted-hull cel outlines rely on a custom GLSL vertex shader that pushes
-      // back-faces outward along normals (position + normal * uThickness).
-      // glTF 2.0 has no custom vertex shaders, so these outline meshes export as duplicate,
-      // non-displaced pitch-black meshes right on top of the real body panels, occluding them completely.
-      const isOutlineMesh = (node: THREE.Object3D): boolean => {
+      // 4. Remove inverted-hull outline meshes and temporary visual FX (beams, cones, flares, ground glow)
+      // glTF 2.0 has no custom vertex shaders or inverted hull cel outlines, so these meshes export as
+      // duplicate, non-displaced pitch-black meshes right on top of the real body panels, occluding them completely.
+      const isOutlineOrBackfaceMesh = (node: THREE.Object3D): boolean => {
         if (!(node as THREE.Mesh).isMesh) return false;
         const mesh = node as THREE.Mesh;
         const mat = mesh.material;
         if (!mat) return false;
         const mats = Array.isArray(mat) ? mat : [mat];
+        const nodeName = (node.name || '').toLowerCase();
         return mats.some((m) => {
-          const hasThickness = (m as any).uniforms && 'uThickness' in (m as any).uniforms;
+          const matName = (m.name || '').toLowerCase();
           const isBackSide = m.side === THREE.BackSide;
-          const nameLower = ((m.name || '') + (node.name || '')).toLowerCase();
-          return (
-            hasThickness ||
-            (isBackSide &&
-              (nameLower.includes('outline') ||
-                nameLower.includes('hull') ||
-                nameLower.includes('ink') ||
-                nameLower.includes('stroke') ||
-                nameLower.includes('edge')))
-          );
+          const hasThickness = (m as any).uniforms && 'uThickness' in (m as any).uniforms;
+          const hasOutlineName =
+            matName.includes('outline') ||
+            matName.includes('hull') ||
+            matName.includes('ink') ||
+            matName.includes('stroke') ||
+            matName.includes('edge') ||
+            matName.includes('silhouette') ||
+            nodeName.includes('outline') ||
+            nodeName.includes('hull') ||
+            nodeName.includes('ink');
+          return isBackSide || hasThickness || hasOutlineName;
         });
       };
 
-      const outlineNodes: THREE.Object3D[] = [];
+      const isVolumetricVfxMesh = (node: THREE.Object3D): boolean => {
+        if (!(node as THREE.Mesh).isMesh) return false;
+        const mesh = node as THREE.Mesh;
+        const name = `${node.name || ''} ${node.parent?.name || ''}`.toLowerCase();
+        const mat = mesh.material;
+        const mats = Array.isArray(mat) ? mat : mat ? [mat] : [];
+        const matNames = mats.map((m) => (m.name || '').toLowerCase()).join(' ');
+
+        if (
+          name.includes('lightfx') ||
+          name.includes('fxgroup') ||
+          name.includes('flare') ||
+          name.includes('beam') ||
+          name.includes('shaft') ||
+          name.includes('volumetric') ||
+          name.includes('groundglow') ||
+          name.includes('glowplane') ||
+          matNames.includes('flare') ||
+          matNames.includes('beam') ||
+          matNames.includes('glowplane') ||
+          matNames.includes('volumetric')
+        ) {
+          return true;
+        }
+
+        for (const m of mats) {
+          if (
+            (m as any).blending === THREE.AdditiveBlending &&
+            (m.transparent || (m as any).depthWrite === false)
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const nodesToRemove: THREE.Object3D[] = [];
       exportRoot.traverse((node) => {
-        if (isOutlineMesh(node)) {
-          outlineNodes.push(node);
+        if (isOutlineOrBackfaceMesh(node) || isVolumetricVfxMesh(node)) {
+          nodesToRemove.push(node);
         }
       });
-      outlineNodes.forEach((node) => {
+      nodesToRemove.forEach((node) => {
         if (node.parent) {
           node.parent.remove(node);
         }
       });
 
-      // 2. Sanitize materials and geometries so custom ShaderMaterials become standard glTF PBR materials
+      // 5. Sanitize materials and geometries so custom ShaderMaterials become standard glTF PBR materials
       exportRoot.traverse((node) => {
         node.userData = {};
         const mesh = node as THREE.Mesh;
@@ -1130,12 +1381,6 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({
           }
         }
       });
-
-      const exportAnimations = Array.isArray(currentModelRef.current.animations)
-        ? currentModelRef.current.animations.filter(
-            (clip): clip is THREE.AnimationClip => clip instanceof THREE.AnimationClip
-          )
-        : [];
 
       const exporter = new GLTFExporter();
       exporter.parse(

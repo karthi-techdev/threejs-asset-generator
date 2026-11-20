@@ -322,7 +322,12 @@ ${names.map((n) => `- ${n}`).join('\n')}
 ${skillsKnowledge}
 
 ### CORE SCULPTING RULES:
-1. CODE ONLY: Reconstruct the object purely from procedural Three.js primitives, custom BufferGeometries, procedural CanvasTextures, and shader materials. NO external .gltf/.glb files, external image URLs, or downloaded art packs.
+1. CODE ONLY & PURE GLTF 2.0 PBR COMPLIANCE (MARKETPLACE & SKETCHFAB READY):
+   - Reconstruct the object purely from procedural Three.js primitives, custom BufferGeometries, and procedural CanvasTextures. NO external .gltf/.glb files or downloaded assets.
+   - STRICT PBR MATERIALS: Use THREE.MeshStandardMaterial or THREE.MeshPhysicalMaterial with explicit color, roughness, metalness, and procedural CanvasTextures.
+   - FORBIDDEN: Strictly DO NOT use THREE.ShaderMaterial, RawShaderMaterial, or custom inline GLSL fragment/vertex shaders. External glTF viewers (Sketchfab, Blender, Unity, Unreal Engine) cannot execute custom GLSL shaders, causing models to turn pitch black or fail.
+   - FORBIDDEN: Strictly DO NOT generate inverted-hull outline meshes (side: THREE.BackSide). In standard glTF viewers, inverted hulls export as duplicate black shells that occlude real body panels.
+   - FORBIDDEN: Do not generate solid cone/cylinder geometry meshes for light beams, flares, or ground glow planes; glTF exports them as solid grey obstruction geometry.
 2. RUNTIME EXPORT FUNCTION & NAMED ANIMATIONS:
    Output a single exported function:
    \`\`\`typescript
@@ -333,19 +338,19 @@ ${skillsKnowledge}
      root.name = 'sculpted-model';
 
      // 1. Procedural Geometries (curves, tubes, primitives, buffer attributes)
-     // 2. Procedural Materials (Standard, Physical, Toon, or ShaderMaterial)
-     // 3. Procedural CanvasTextures for high-res surface detail
-     // 4. Articulated Object Hierarchy (pivots at joints/hips/neck/tail) with castShadow and receiveShadow
+     // 2. Procedural Standard PBR Materials (MeshStandardMaterial / MeshPhysicalMaterial)
+     // 3. Procedural CanvasTextures for decals, liveries, grain, anime stripes, surface detail
+     // 4. Articulated Object Hierarchy with unique names on every pivot (wheelFL, doorLeftPivot, steeringWheel)
 
-     // 5. Named Selectable Animations (displayed automatically in the Studio Viewport UI)
-     // Whenever the user requests animations (e.g. idle, walk, run, sit, bark, jump, wagTail),
+     // 5. Named Selectable Animations (displayed automatically in Studio UI and baked into .GLB export)
+     // Whenever the user requests animations (e.g. idle, walk, drive, drift, wipers, steer, jump),
      // implement EVERY requested animation as a named function in root.userData.animations.
      // Always set transforms explicitly from rest pose values so switching animations never leaves stuck limbs.
      root.userData.animations = {
        idle: (delta: number, elapsed: number) => {
-         // subtle breathing, ear twitch, or gentle sway
+         // subtle breathing, engine idle vibration, or gentle sway
        },
-       // Add every animation requested by the user (e.g. walk, run, sit, jump, bark, etc.)
+       // Add every animation requested by the user
      };
      root.userData.defaultAnimation = 'idle';
 
@@ -357,17 +362,21 @@ ${skillsKnowledge}
      return root;
    }
    \`\`\`
-3. DETAIL ACCURACY & MATERIALS:
+3. DETAIL ACCURACY & GLTF 2.0 PBR MATERIALS:
    - Identify identity-defining details: bevels, chamfers, panel seams, fasteners, surface wear, gloss vs matte zones.
-   - PBR Materials: Use MeshStandardMaterial or MeshPhysicalMaterial with explicit color, roughness, metalness, clearcoat, or procedural CanvasTextures.
-   - Stylized/Anime Models: If using custom ShaderMaterial or MeshToonMaterial, ALWAYS define color uniforms clearly (e.g. uColor) and attach \`material.userData.gltfMaterial = new THREE.MeshStandardMaterial({ color: ..., roughness: 0.5, metalness: 0.1 })\` so exported .glb models preserve rich colors and textures in external 3D viewers.
-4. ANIMATION RIGGING:
-   - Build articulated sub-groups (e.g. headPivot, jawPivot, tailPivot, frontLeftLeg, backRightLeg, etc.) placed at true anatomical/mechanical joint origins so rotations look natural.
-   - If the user asks for multiple animations (e.g., "dog with idle, walk, run, sit, and bark animations"), define ALL of them in \`root.userData.animations\` using clear camelCase/snake_case keys.
+   - Automotive Paint: MeshStandardMaterial({ color: 0xffd71a, roughness: 0.22, metalness: 0.15 })
+   - Chrome / Machined Metal: MeshStandardMaterial({ color: 0xe8ecf0, roughness: 0.12, metalness: 0.95 })
+   - Rubber / Tires: MeshStandardMaterial({ color: 0x222226, roughness: 0.85, metalness: 0.02 })
+   - Tinted Glass / Windows: MeshPhysicalMaterial({ color: 0x161c24, transparent: true, opacity: 0.35, roughness: 0.05, metalness: 0.10, depthWrite: false })
+   - Headlight / Taillight Lenses: MeshStandardMaterial with high emissive color for active lighting.
+4. ANIMATION RIGGING & CLEAR NODE NAMING:
+   - Build articulated sub-groups placed at true anatomical/mechanical joint origins.
+   - CRITICAL FOR GLB EXPORT: Assign clean, descriptive names to every joint and animated group (e.g. root, wheelFL, wheelFR, wheelRL, wheelRR, steeringWheel, doorLeftPivot, doorRightPivot, wiperLeft, wiperRight, spoilerPivot).
+   - The platform automatically samples root.userData.animations and bakes them into real glTF keyframe tracks (THREE.AnimationClip) so animations play natively in Sketchfab, Blender, and Unity.
 5. SHADOWS & LIGHTING:
    - Mark meshes with \`mesh.castShadow = true\` and \`mesh.receiveShadow = true\`.
 6. PROCEDURAL TEXTURES (CanvasTexture):
-   - When textures are needed (car paint, decals, wood grain, bark, leaves, fur patterns, metal panels, screens, cloth), generate them procedurally using an in-memory HTML5 Canvas and \`new THREE.CanvasTexture(canvas)\`.
+   - When decals, anime liveries, stripes, carbon-fiber, wood grain, leaves, or typography are needed, generate them procedurally using an in-memory HTML5 Canvas and \`new THREE.CanvasTexture(canvas)\`.
    - Always set \`texture.colorSpace = THREE.SRGBColorSpace;\` and \`texture.needsUpdate = true;\` so colors render accurately in WebGL and export cleanly to .glb.
 7. RETURN FORMAT:
    - Return ONLY clean, executable TypeScript/JavaScript code inside a \`\`\`typescript code block, followed by a brief bulleted breakdown of the animations and Three.js skills you applied.

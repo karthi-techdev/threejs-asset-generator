@@ -59,7 +59,7 @@ export const MCP_TOOLS = [
         code: {
           type: 'string',
           description:
-            'Complete executable Three.js TypeScript/JavaScript code module. Must export function createModel(): THREE.Group (or THREE.Object3D) with procedural geometries, materials, and optional animations. For multiple selectable animations (e.g. idle, walk, run, sit, bark), attach named handlers to root.userData.animations = { idle: (delta, elapsed) => ..., walk: (delta, elapsed) => ... } (with optional root.userData.defaultAnimation) or attach THREE.AnimationClip[] to root.animations. Single-loop animations can also use root.userData.tick(delta, elapsed).',
+            'Complete executable Three.js TypeScript/JavaScript code module. Must export function createModel(): THREE.Group (or THREE.Object3D) with procedural geometries, standard glTF 2.0 PBR materials (MeshStandardMaterial or MeshPhysicalMaterial with optional procedural CanvasTextures), and optional animations. Strictly DO NOT use custom ShaderMaterial or inverted-hull BackSide outlines so exported .GLB models retain 100% color and material fidelity on Sketchfab, Blender, Unity, and Unreal. For selectable animations, attach named handlers to root.userData.animations = { idle: (delta, elapsed) => ..., drive: ... } (with optional root.userData.defaultAnimation). The studio platform automatically bakes them into real glTF keyframe tracks (THREE.AnimationClip) on export.',
         },
         title: {
           type: 'string',
