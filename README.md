@@ -21,15 +21,13 @@ The input 2D stylized reference image provided to **Gemini 4 Neon Update** over 
 
 ---
 
-### 2. Live 3D Model & Animation Output (Video)
+### 2. Live 3D Model & Animation Output
 
 Procedural 3D model with custom animations (drift, drive, idle, wipers, steer), articulated mechanical joints, and standard glTF 2.0 PBR materials:
 
-https://github.com/user-attachments/assets/result-gif.mp4
+![Live 3D Animation Output Generated in Gemini 4 Neon Update](./preview.gif)
 
-<video src="./result-gif.mp4" controls width="100%"></video>
-
-[**Click here to watch / download the 1080p animation video (`result-gif.mp4`)**](./result-gif.mp4)
+🎬 [**Download / Watch the Full 1080p Video with Audio (`result-gif.mp4`)**](./result-gif.mp4)
 
 > **Generated in Gemini 4 Neon Update**: Pure procedural Three.js asset generated over the Model Context Protocol (MCP) in a single session from the reference picture above. The model includes articulated pivots, animated wheels and wipers, multi-layer PBR materials, and clean `.GLB` export ready for Sketchfab, Blender, Unity, and Unreal Engine.
 
